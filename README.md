@@ -33,9 +33,11 @@ The AI processes the input and generates several avatar options to choose from. 
 - Remote workers needing a professional but personal avatar
 - Anyone active on social media or online communities
 
-![AI Avatar Example](https://upload.wikimedia.org/wikipedia/commons/5/5e/Sleeping_cat_on_her_back.jpg)
+![AI Avatar Example](/workflow_diagram.png)
 
-<img src="https://upload.wikimedia.org/wikipedia/commons/5/5e/Sleeping_cat_on_her_back.jpg" width="300">
+![image of a cat](/workflow_diagram.png)
+
+![image of a cat](/avatar_styles.png)
 
 Example of how a generation request might look in code:
 
