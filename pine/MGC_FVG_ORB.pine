@@ -43,7 +43,7 @@ strategy(
      calc_on_every_tick      = false,        // solo evalúa al cierre de vela
      process_orders_on_close = true,         // entra al cierre que dispara la señal
      max_boxes_count         = 500,
-     max_labels_count        = 100,
+     max_labels_count        = 500,   // una señal al día: cabe un backtest largo
      max_lines_count         = 100)
 
 // =============================================================================
@@ -127,6 +127,9 @@ i_showBoxes = input.bool(true, "Dibujar zonas",                 group = G_VIS)
 i_showLvls  = input.bool(true, "Dibujar niveles de sesión",     group = G_VIS)
 i_showVwap  = input.bool(true, "Dibujar VWAP y bandas",         group = G_VIS)
 i_showTable = input.bool(true, "Mostrar tabla de diagnóstico",  group = G_VIS)
+i_showSig   = input.bool(true, "Etiquetas COMPRA / VENTA",      group = G_VIS,
+     tooltip = "Marca en el gráfico la vela que dispara la señal: COMPRA en verde bajo la vela, VENTA en rojo encima. " +
+               "Al pasar el ratón por encima se ven entrada, stop, objetivo, contratos y motivo.")
 
 // =============================================================================
 //  2 · VENTANA, RELOJ Y CONTADOR DIARIO
@@ -590,6 +593,19 @@ if canTrade and not na(pick) and not na(atr)
             else
                 strategy.entry("S", strategy.short, qty = qty, alert_message = msg)
                 strategy.exit("salida S", from_entry = "S", stop = stop, limit = target, alert_message = "Salida corto MGC")
+
+            // Etiqueta en el gráfico: COMPRA en verde debajo, VENTA en rojo
+            // encima. El detalle completo va en el tooltip para no ensuciar.
+            if i_showSig
+                label.new(
+                     x         = bar_index,
+                     y         = isLong ? low - atr * 0.7 : high + atr * 0.7,
+                     text      = isLong ? "COMPRA" : "VENTA",
+                     color     = isLong ? color.new(color.green, 0) : color.new(color.red, 0),
+                     textcolor = color.white,
+                     style     = isLong ? label.style_label_up : label.style_label_down,
+                     size      = size.normal,
+                     tooltip   = msg)
 
             alert(msg, alert.freq_once_per_bar_close)
             pick.fired  := true
