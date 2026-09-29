@@ -107,6 +107,11 @@ i_minClearR = input.float(2.0, "Holgura mínima al nivel del marco mayor (R)", m
      tooltip = "Modo B: si el nivel opuesto del marco mayor está a menos de esta distancia (en múltiplos del riesgo), no hay operación. " +
                "Con 2.0 el nivel actúa como filtro de holgura y el objetivo sigue siendo el de la cuenta; por debajo de 2.0 el nivel pasa a " +
                "ser el objetivo real y el ratio riesgo/beneficio empeora.")
+i_obstacles = input.string("Solo zonas del marco mayor", "Qué obstruye el recorrido (modo B)",
+     options = ["Solo zonas del marco mayor", "+ máx/mín del día anterior", "+ extremos de sesión"], group = G_MTF,
+     tooltip = "Qué niveles cuentan como pared al medir la holgura. Incluir los extremos de la sesión hace que el filtro vete casi todo: " +
+               "el máximo de la sesión está normalmente a pocos puntos del precio, y romperlo es justo lo que pasa en un día de tendencia. " +
+               "Por eso solo las zonas del marco mayor cuentan por defecto.")
 
 // --- Filtros -----------------------------------------------------------------
 const string G_FLT = "Filtros"
@@ -117,9 +122,24 @@ i_vwapBand  = input.bool(true, "Rechazar entradas fuera de la banda de VWAP", gr
      tooltip = "Evita comprar por encima de +σ o vender por debajo de -σ: a esa altura el movimiento ya está extendido y estarías persiguiendo " +
                "precio. Es la regla que justifica dibujar las bandas, no solo la línea central.")
 i_reqSweep  = input.bool(false, "Exigir barrido de liquidez previo", group = G_FLT,
-     tooltip = "Principal palanca para endurecer el filtro: obliga a que haya habido una mecha que barre un extremo previo y cierra dentro, " +
+     tooltip = "Endurece el filtro del FVG: obliga a que haya habido una mecha que barre un extremo previo y cierra dentro, " +
                "en las últimas N velas y en la dirección del trade.")
 i_sweepLook = input.int(12, "Velas de memoria del barrido", minval = 1, maxval = 60, group = G_FLT)
+
+// --- Barrido como disparador propio ------------------------------------------
+const string G_SWP = "Entradas por barrido de liquidez"
+i_useSweep  = input.bool(true, "Operar los barridos como entrada", group = G_SWP,
+     tooltip = "Segundo disparador, independiente del FVG: mecha que supera un extremo previo y cierra de vuelta dentro. Barrer mínimos " +
+               "genera COMPRA y barrer máximos genera VENTA, porque la mecha ha cazado los stops del lado contrario y el cierre de vuelta " +
+               "dice que no había continuación. El stop va al extremo de la propia mecha, que es lo que invalida la lectura.")
+i_sweepRefs = input.string("Día anterior + sesión", "Qué extremos se consideran barridos",
+     options = ["Solo día anterior", "Día anterior + sesión", "Todo (día, sesión, swing)"], group = G_SWP,
+     tooltip = "Máximo y mínimo del día anterior son los niveles con más liquidez acumulada y los que pediste marcar. Añadir los extremos " +
+               "de la sesión y los swings da más señales a cambio de niveles menos significativos.")
+i_sweepVwap = input.bool(false, "Aplicar los filtros de VWAP a los barridos", group = G_SWP,
+     tooltip = "Desactivado a propósito. Un barrido de mínimos ocurre con el precio hundido, casi siempre por DEBAJO del VWAP y fuera de la " +
+               "banda inferior: exigirle el lado correcto del VWAP eliminaría precisamente las señales que este disparador busca. " +
+               "Los filtros de VWAP siguen aplicándose a las entradas por FVG, que sí son de continuación.")
 
 // --- Visual ------------------------------------------------------------------
 const string G_VIS = "Visual"
@@ -249,10 +269,32 @@ else if inWindow
 // --- Barridos de liquidez ----------------------------------------------------
 //  Mecha que supera un extremo previo y cierra de vuelta dentro. Barrer mínimos
 //  es alcista (han cazado stops de vendidos); barrer máximos, bajista.
-bool sweepBull = barstate.isconfirmed and ((not na(pdl) and low  < pdl    and close > pdl) or
-                                           (not na(swLow)  and low  < swLow  and close > swLow))
-bool sweepBear = barstate.isconfirmed and ((not na(pdh) and high > pdh    and close < pdh) or
-                                           (not na(swHigh) and high > swHigh and close < swHigh))
+//  Los extremos de sesión se comparan contra su valor de la vela ANTERIOR:
+//  sessHigh/sessLow ya han absorbido la vela en curso, así que compararlos
+//  consigo mismos no detectaría nunca nada.
+bool confBar = barstate.isconfirmed
+
+bool swpPdl = confBar and not na(pdl) and low  < pdl  and close > pdl
+bool swpPdh = confBar and not na(pdh) and high > pdh  and close < pdh
+
+bool sessRef  = inWindow and not windowStart
+bool swpSesLo = confBar and sessRef and not na(sessLow[1])  and low  < sessLow[1]  and close > sessLow[1]
+bool swpSesHi = confBar and sessRef and not na(sessHigh[1]) and high > sessHigh[1] and close < sessHigh[1]
+
+bool swpSwLo = confBar and not na(swLow)  and low  < swLow  and close > swLow
+bool swpSwHi = confBar and not na(swHigh) and high > swHigh and close < swHigh
+
+bool refSess  = i_sweepRefs != "Solo día anterior"
+bool refSwing = i_sweepRefs == "Todo (día, sesión, swing)"
+
+bool sweepBull = swpPdl or (refSess and swpSesLo) or (refSwing and swpSwLo)
+bool sweepBear = swpPdh or (refSess and swpSesHi) or (refSwing and swpSwHi)
+
+// Qué nivel concreto se barrió, para el motivo de la señal.
+string swpNameBull = swpPdl ? "mínimo del día anterior" : (refSess and swpSesLo) ? "mínimo de la sesión" :
+     (refSwing and swpSwLo) ? "mínimo de swing" : ""
+string swpNameBear = swpPdh ? "máximo del día anterior" : (refSess and swpSesHi) ? "máximo de la sesión" :
+     (refSwing and swpSwHi) ? "máximo de swing" : ""
 
 bool sweepBullRecent = nz(ta.barssince(sweepBull), 999999) <= i_sweepLook
 bool sweepBearRecent = nz(ta.barssince(sweepBear), 999999) <= i_sweepLook
@@ -459,18 +501,24 @@ f_htfOppositeLevel(bool isLong, float from) =>
                             best  := near
     best
 
-// Los niveles de sesión también obstruyen el recorrido.
+// Obstrucciones de sesión, solo las que el usuario haya activado.
+//  Cuidado con incluir los extremos de sesión: el máximo de la sesión está casi
+//  siempre a pocos puntos del precio, así que tratarlo como pared hace que la
+//  holgura mínima vete casi cualquier entrada en retroceso. Romper ese máximo es
+//  precisamente lo que ocurre en un día de tendencia, no una pared.
 f_sessionObstacle(bool isLong, float from) =>
+    bool  usePrevDay = i_obstacles != "Solo zonas del marco mayor"
+    bool  useSession = i_obstacles == "+ extremos de sesión"
     float lvl = na
     if isLong
-        if not na(pdh) and pdh > from
+        if usePrevDay and not na(pdh) and pdh > from
             lvl := pdh
-        if not na(sessHigh) and sessHigh > from
+        if useSession and not na(sessHigh) and sessHigh > from
             lvl := na(lvl) ? sessHigh : math.min(lvl, sessHigh)
     else
-        if not na(pdl) and pdl < from
+        if usePrevDay and not na(pdl) and pdl < from
             lvl := pdl
-        if not na(sessLow) and sessLow < from
+        if useSession and not na(sessLow) and sessLow < from
             lvl := na(lvl) ? sessLow : math.max(lvl, sessLow)
     lvl
 
@@ -502,8 +550,19 @@ var float  pendTarget = na
 bool flat     = strategy.position_size == 0
 bool canTrade = barstate.isconfirmed and inWindow and not forceOut and flat and tradesToday < i_maxTrades
 
-f_reason(bool isLong, FVG z) =>
-    string s = "FVG " + z.tf + (isLong ? " alcista" : " bajista") + (z.inverted ? " invertido" : "") + " al 50%"
+// --- Contadores de diagnóstico ----------------------------------------------
+//  Existen para responder con datos a "salen muy pocas señales": dicen qué
+//  filtro concreto está vetando, en lugar de tener que adivinarlo.
+var int cntSetup = 0    // setups detectados en total
+var int rejGate  = 0    // fuera de ventana, ya operado hoy, o posición abierta
+var int rejMtf   = 0
+var int rejVwap  = 0
+var int rejSweep = 0
+var int rejStop  = 0
+var int rejClear = 0
+
+f_reason(bool isLong, string head) =>
+    string s = head
     s += ", sesgo 5m/" + (bias5  == 1 ? "+" : bias5  == -1 ? "-" : "0")
     s += " 1H/"        + (bias1h == 1 ? "+" : bias1h == -1 ? "-" : "0")
     s += " 4H/"        + (bias4h == 1 ? "+" : bias4h == -1 ? "-" : "0")
@@ -511,31 +570,61 @@ f_reason(bool isLong, FVG z) =>
         s += ", CHoCH"
     else if bosUp or bosDn
         s += ", BOS"
-    if isLong and sweepBullRecent
-        s += ", barrido de mínimos"
-    if not isLong and sweepBearRecent
-        s += ", barrido de máximos"
     s
 
-if canTrade and not na(pick) and not na(atr)
-    bool  isLong = pick.dir == 1
+// --- Detección del setup ----------------------------------------------------
+//  Dos disparadores independientes. El FVG en su 50% tiene prioridad porque su
+//  nivel es más preciso; el barrido entra cuando no hay FVG disparando en la
+//  misma vela.
+int    setDir  = 0
+string setKind = ""
+if not na(pick)
+    setDir  := pick.dir
+    setKind := "FVG"
+else if i_useSweep and confBar
+    if sweepBull
+        setDir  := 1
+        setKind := "Barrido"
+    else if sweepBear
+        setDir  := -1
+        setKind := "Barrido"
+
+if setDir != 0 and confBar
+    cntSetup += 1
+    if not canTrade
+        rejGate += 1
+
+if canTrade and setDir != 0 and not na(atr)
+    bool  isLong = setDir == 1
+    bool  isFvg  = setKind == "FVG"
     float entry  = close
 
     // --- Filtros ------------------------------------------------------------
-    bool okMtf   = f_mtfOk(isLong)
-    bool okVwap  = (not i_useVwap) or na(vwap) or (isLong ? close > vwap : close < vwap)
-    // Sin perseguir precio: fuera de la banda el movimiento ya está extendido.
-    bool okBand  = (not i_vwapBand) or na(vwapUp) or (isLong ? close <= vwapUp : close >= vwapDn)
-    bool okSweep = (not i_reqSweep) or (isLong ? sweepBullRecent : sweepBearRecent)
+    bool okMtf = f_mtfOk(isLong)
+    // Los filtros de VWAP solo se aplican al FVG, salvo que se pidan también
+    // para los barridos: un barrido ocurre con el precio hundido o disparado y
+    // fuera de la banda, que es exactamente lo que esos filtros descartan.
+    bool applyVwap = isFvg or i_sweepVwap
+    bool okVwap = (not applyVwap) or (not i_useVwap)  or na(vwap)   or (isLong ? close > vwap   : close < vwap)
+    bool okBand = (not applyVwap) or (not i_vwapBand) or na(vwapUp) or (isLong ? close <= vwapUp : close >= vwapDn)
+    // Un barrido ya es el barrido: no se le exige otro previo.
+    bool okSweep = (not isFvg) or (not i_reqSweep) or (isLong ? sweepBullRecent : sweepBearRecent)
 
-    // --- Stop estructural ---------------------------------------------------
+    // --- Stop ---------------------------------------------------------------
     float buf     = i_stopBuf * atr
-    float refSw   = isLong ? swLow : swHigh
-    float refZone = isLong ? pick.bot : pick.top
-    float stopRef = switch i_stopRef
-        "Swing"            => refSw
-        "Borde de la zona" => refZone
-        =>                    isLong ? math.min(nz(refSw, refZone), refZone) : math.max(nz(refSw, refZone), refZone)
+    float stopRef = na
+    if isFvg
+        float refSw   = isLong ? swLow : swHigh
+        float refZone = isLong ? pick.bot : pick.top
+        stopRef := switch i_stopRef
+            "Swing"            => refSw
+            "Borde de la zona" => refZone
+            =>                    isLong ? math.min(nz(refSw, refZone), refZone) : math.max(nz(refSw, refZone), refZone)
+    else
+        // La mecha del barrido es la invalidación: si el precio vuelve más allá
+        // de ella, la lectura del barrido era falsa.
+        stopRef := isLong ? low : high
+
     float stop = na(stopRef) ? na : (isLong ? stopRef - buf : stopRef + buf)
     // Las órdenes solo existen en la rejilla de ticks. Se redondea alejando el
     // stop del precio para no calcular el riesgo por debajo del real.
@@ -546,6 +635,16 @@ if canTrade and not na(pick) and not na(atr)
 
     // Techo duro: si la estructura pide más de lo permitido, no se opera.
     bool okStop = not na(riskPts) and riskPts > 0 and riskPts <= i_maxStopPts
+
+    // Se cuenta el primer filtro que veta, para saber cuál es el que ahoga.
+    if not okMtf
+        rejMtf += 1
+    else if not (okVwap and okBand)
+        rejVwap += 1
+    else if not okSweep
+        rejSweep += 1
+    else if not okStop
+        rejStop += 1
 
     if okMtf and okVwap and okBand and okSweep and okStop
         // --- Tamaño: nunca menos de 1 contrato, nunca más riesgo del fijado
@@ -570,6 +669,9 @@ if canTrade and not na(pick) and not na(atr)
                 // El nivel recorta el objetivo si queda por delante de él.
                 target  := isLong ? math.min(target, lvl - invM) : math.max(target, lvl + invM)
 
+        if not okClear
+            rejClear += 1
+
         // Objetivo también a la rejilla de ticks, redondeado en contra para no
         // contar como alcanzado un nivel que en real no se habría tocado.
         target := isLong ? math.ceil(target / f_tickPoints) * f_tickPoints
@@ -579,13 +681,23 @@ if canTrade and not na(pick) and not na(atr)
             pendStop   := stop
             pendTarget := target
 
+            // Cabecera del motivo. Se construye con if/else y no con un
+            // ternario porque Pine evalúa las DOS ramas de un ?: y leer un
+            // campo de `pick` cuando es na (caso barrido) daría error.
+            string head = ""
+            if isFvg
+                head := "FVG " + pick.tf + (isLong ? " alcista" : " bajista") +
+                     (pick.inverted ? " invertido" : "") + " al 50%"
+            else
+                head := "Barrido de " + (isLong ? swpNameBull : swpNameBear)
+
             string msg = (isLong ? "COMPRA" : "VENTA") + " MGC" +
                  " | entrada "  + str.tostring(entry,  format.mintick) +
                  " | stop "     + str.tostring(stop,   format.mintick) +
                  " | objetivo " + str.tostring(target, format.mintick) +
                  " | " + str.tostring(qty) + " contrato(s)" +
                  " | riesgo "   + str.tostring(math.round(qty * riskPts * f_pointValue)) + " USD" +
-                 " | motivo: "  + f_reason(isLong, pick)
+                 " | motivo: "  + f_reason(isLong, head)
 
             if isLong
                 strategy.entry("L", strategy.long, qty = qty, alert_message = msg)
@@ -608,7 +720,10 @@ if canTrade and not na(pick) and not na(atr)
                      tooltip   = msg)
 
             alert(msg, alert.freq_once_per_bar_close)
-            pick.fired  := true
+            // Solo el setup de FVG tiene zona que marcar como disparada; en un
+            // barrido `pick` es na.
+            if isFvg
+                pick.fired := true
             tradesToday += 1
 
 // Refresco de la protección mientras haya posición abierta.
@@ -649,7 +764,7 @@ plotshape(sweepBear, "Barrido de máximos",  shape.xcross,       location.aboveb
 f_biasTxt(int b) => b ==  1 ? "alcista" : b == -1 ? "bajista" : "rango"
 f_biasCol(int b) => b ==  1 ? color.new(color.teal, 0) : b == -1 ? color.new(color.maroon, 0) : color.new(color.gray, 0)
 
-var table diag = table.new(position.top_right, 2, 10, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50))
+var table diag = table.new(position.top_right, 2, 13, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50))
 
 if i_showTable and barstate.islast
     float upLvl = na
@@ -701,3 +816,17 @@ if i_showTable and barstate.islast
 
     table.cell(diag, 0, 9, "Zonas activas", text_size = size.small)
     table.cell(diag, 1, 9, str.tostring(nAct) + " de " + str.tostring(array.size(zones)), text_size = size.small)
+
+    // Diagnóstico de escasez de señales: cuántos setups se detectaron y qué
+    // filtro se comió cada uno. El mayor de estos números es el que ahoga.
+    table.cell(diag, 0, 10, "Setups vistos", text_size = size.small)
+    table.cell(diag, 1, 10, str.tostring(cntSetup) + "  ->  " + str.tostring(strategy.closedtrades + strategy.opentrades) + " operados",
+         text_size = size.small)
+
+    table.cell(diag, 0, 11, "Vetados por", text_size = size.small)
+    table.cell(diag, 1, 11, "ventana/límite " + str.tostring(rejGate) + " · MTF " + str.tostring(rejMtf) +
+         " · VWAP " + str.tostring(rejVwap), text_size = size.small)
+
+    table.cell(diag, 0, 12, "", text_size = size.small)
+    table.cell(diag, 1, 12, "barrido " + str.tostring(rejSweep) + " · stop>" + str.tostring(i_maxStopPts, "#") +
+         "pts " + str.tostring(rejStop) + " · holgura " + str.tostring(rejClear), text_size = size.small)
