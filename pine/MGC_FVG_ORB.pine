@@ -1,0 +1,687 @@
+//@version=6
+// =============================================================================
+//  MGC 12-26 (Micro Gold Futures) · FVG + Estructura de mercado · 5 minutos
+// =============================================================================
+//  Estrategia de una sola operación diaria sobre zonas de imbalance (Fair Value
+//  Gaps) validadas por estructura de mercado multimarco.
+//
+//  DECISIONES DE DISEÑO (acordadas antes de escribir el código):
+//   1. Conflicto entre marcos: por defecto se opera el 5m hacia el siguiente
+//      nivel del marco mayor, exigiendo una holgura mínima (modo B). Los modos
+//      A (solo a favor del 4H) y C (alineación de los tres marcos) son inputs.
+//   2. Disparo de entrada: cierre de vela de 5m en el 50% de la zona.
+//   3. Stop estructural bajo/sobre el swing. Si excede el techo de puntos, la
+//      operación se descarta (el stop NO se recorta).
+//   4. Un FVG es válido hasta su 50% (consequent encroachment). Ese 50% es el
+//      nivel de entrada y al perforarlo la zona queda consumida.
+//   5. Invalidación: cierre al otro lado del borde lejano + margen en ATR.
+//   6. Solape de zonas: manda el marco mayor (4H > 1H > 5m).
+//   7. Ventana: anclable al reloj de Madrid o a la apertura de Nueva York.
+//
+//  SIN REPINTADO: toda decisión se toma sobre velas cerradas
+//  (barstate.isconfirmed), los pivotes confirman con retardo por construcción y
+//  request.security usa lookahead_off sobre velas ya cerradas del marco mayor.
+//
+//  DIMENSIONAMIENTO: MGC son 10 USD/punto y no se puede bajar de 1 contrato,
+//  así que con 150 USD de riesgo el stop tiene un techo duro de 15 puntos.
+//  "Ajustar el tamaño" solo funciona hacia arriba (un stop más ajustado permite
+//  2+ contratos), nunca hacia abajo.
+// =============================================================================
+
+strategy(
+     title                   = "MGC · FVG + Estructura (5m)",
+     shorttitle              = "MGC FVG 5m",
+     overlay                 = true,
+     initial_capital         = 50000,
+     currency                = currency.USD,
+     pyramiding              = 0,
+     default_qty_type        = strategy.fixed,
+     default_qty_value       = 1,
+     commission_type         = strategy.commission.cash_per_order,
+     commission_value        = 1.0,          // 1 USD por orden = 2 USD round turn
+     slippage                = 1,            // 1 tick = 0,10 puntos = 1 USD
+     calc_on_every_tick      = false,        // solo evalúa al cierre de vela
+     process_orders_on_close = true,         // entra al cierre que dispara la señal
+     max_boxes_count         = 500,
+     max_labels_count        = 100,
+     max_lines_count         = 100)
+
+// =============================================================================
+//  1 · INPUTS
+// =============================================================================
+
+// --- Instrumento -------------------------------------------------------------
+const string G_INS = "Instrumento"
+f_pointValue = input.float(10.0, "USD por punto",        group = G_INS, minval = 0.01, tooltip = "MGC = 10 USD por punto y contrato.")
+f_tickPoints = input.float(0.10, "Tamaño de tick (pts)", group = G_INS, minval = 0.001, tooltip = "MGC = 0,10 puntos por tick.")
+
+// --- Ventana de operativa ----------------------------------------------------
+const string G_SES = "Ventana de operativa"
+i_anchor      = input.string("Apertura de NY", "Anclaje de la ventana", options = ["Reloj de Madrid", "Apertura de NY"], group = G_SES,
+     tooltip = "Entre el 25-oct y el 1-nov de 2026 Europa y EE.UU. cambian de hora en fechas distintas: Madrid pasa a UTC+1 con Nueva York " +
+               "todavía en UTC-4. Con 'Reloj de Madrid' operarías esa semana una hora después de la apertura de NY; con 'Apertura de NY' la " +
+               "ventana sigue siempre a la apertura.")
+i_sessMadrid  = input.session("1530-1900", "Ventana (hora de Madrid)", group = G_SES)
+i_sessNY      = input.session("0930-1300", "Ventana (hora de NY)",     group = G_SES)
+i_closeMadrid = input.int(21, "Hora de cierre forzoso (Madrid)", minval = 0, maxval = 23, group = G_SES)
+i_closeNY     = input.int(15, "Hora de cierre forzoso (NY)",     minval = 0, maxval = 23, group = G_SES)
+i_maxTrades   = input.int(1,  "Máximo de operaciones al día",    minval = 1, maxval = 5,  group = G_SES)
+
+// --- Fair Value Gaps ---------------------------------------------------------
+const string G_FVG = "Fair Value Gaps"
+i_atrLen     = input.int(14,    "Periodo del ATR",                minval = 2,   group = G_FVG)
+i_fvgMinMult = input.float(0.5, "Anchura mínima del FVG (x ATR)", minval = 0.0, step = 0.1,  group = G_FVG,
+     tooltip = "Un hueco más estrecho que media vela media no sirve como zona de entrada.")
+i_invMargin  = input.float(0.25,"Margen de invalidación (x ATR)", minval = 0.0, step = 0.05, group = G_FVG,
+     tooltip = "Cuánto tiene que cerrar el precio más allá del borde lejano para matar la zona. Adaptativo: se ensancha con la volatilidad.")
+i_useHtf1    = input.bool(true, "Detectar FVG en el marco intermedio", group = G_FVG)
+i_useHtf2    = input.bool(true, "Detectar FVG en el marco mayor",      group = G_FVG)
+i_tf1        = input.timeframe("60",  "Marco intermedio", group = G_FVG)
+i_tf2        = input.timeframe("240", "Marco mayor",      group = G_FVG)
+i_maxZones   = input.int(60, "Máximo de zonas en memoria", minval = 10, maxval = 200, group = G_FVG)
+
+// --- Estructura de mercado ---------------------------------------------------
+const string G_STR = "Estructura de mercado"
+i_pivL    = input.int(5, "Pivote izquierda (5m)", minval = 1, group = G_STR)
+i_pivR    = input.int(5, "Pivote derecha (5m)",   minval = 1, group = G_STR,
+     tooltip = "El pivote confirma este número de velas después de formarse. Por eso la estructura no repinta, a costa de ese retardo.")
+i_pivHtfL = input.int(3, "Pivote izquierda (marcos superiores)", minval = 1, group = G_STR)
+i_pivHtfR = input.int(3, "Pivote derecha (marcos superiores)",   minval = 1, group = G_STR)
+
+// --- Riesgo ------------------------------------------------------------------
+const string G_RSK = "Riesgo y objetivo"
+i_riskUSD    = input.float(150.0, "Riesgo por operación (USD)",   minval = 1,   group = G_RSK)
+i_targetUSD  = input.float(300.0, "Objetivo por operación (USD)", minval = 1,   group = G_RSK)
+i_maxStopPts = input.float(15.0,  "Techo del stop (puntos)",      minval = 0.1, group = G_RSK,
+     tooltip = "Con 10 USD/punto y 150 USD de riesgo, 15 puntos es el máximo con 1 contrato. Si la estructura pide más, la operación se descarta.")
+i_stopRef    = input.string("Swing", "Referencia del stop", options = ["Swing", "Borde de la zona", "El más lejano"], group = G_RSK)
+i_stopBuf    = input.float(0.30, "Colchón del stop (x ATR)", minval = 0.0, step = 0.05, group = G_RSK)
+i_scaleUp    = input.bool(true, "Escalar contratos si el stop es ajustado", group = G_RSK,
+     tooltip = "Con un stop de 7,5 puntos caben 2 contratos sin pasar de 150 USD. Desactívalo para operar siempre 1 contrato.")
+
+// --- Conflicto entre marcos --------------------------------------------------
+const string G_MTF = "Conflicto entre marcos"
+i_mtfMode   = input.string("B · Hasta el nivel del marco mayor", "Regla de conflicto",
+     options = ["A · Solo a favor del marco mayor", "B · Hasta el nivel del marco mayor", "C · Alineación de los tres marcos"], group = G_MTF)
+i_minClearR = input.float(2.0, "Holgura mínima al nivel del marco mayor (R)", minval = 0.1, step = 0.1, group = G_MTF,
+     tooltip = "Modo B: si el nivel opuesto del marco mayor está a menos de esta distancia (en múltiplos del riesgo), no hay operación. " +
+               "Con 2.0 el nivel actúa como filtro de holgura y el objetivo sigue siendo el de la cuenta; por debajo de 2.0 el nivel pasa a " +
+               "ser el objetivo real y el ratio riesgo/beneficio empeora.")
+
+// --- Filtros -----------------------------------------------------------------
+const string G_FLT = "Filtros"
+i_useVwap   = input.bool(true, "Exigir el lado correcto del VWAP de sesión", group = G_FLT,
+     tooltip = "Largos solo con el cierre por encima del VWAP de sesión, cortos por debajo. Es la regla que justifica dibujar el VWAP.")
+i_vwapMult  = input.float(1.0, "Desviaciones de las bandas de VWAP", minval = 0.1, step = 0.25, group = G_FLT)
+i_vwapBand  = input.bool(true, "Rechazar entradas fuera de la banda de VWAP", group = G_FLT,
+     tooltip = "Evita comprar por encima de +σ o vender por debajo de -σ: a esa altura el movimiento ya está extendido y estarías persiguiendo " +
+               "precio. Es la regla que justifica dibujar las bandas, no solo la línea central.")
+i_reqSweep  = input.bool(false, "Exigir barrido de liquidez previo", group = G_FLT,
+     tooltip = "Principal palanca para endurecer el filtro: obliga a que haya habido una mecha que barre un extremo previo y cierra dentro, " +
+               "en las últimas N velas y en la dirección del trade.")
+i_sweepLook = input.int(12, "Velas de memoria del barrido", minval = 1, maxval = 60, group = G_FLT)
+
+// --- Visual ------------------------------------------------------------------
+const string G_VIS = "Visual"
+i_showBoxes = input.bool(true, "Dibujar zonas",                 group = G_VIS)
+i_showLvls  = input.bool(true, "Dibujar niveles de sesión",     group = G_VIS)
+i_showVwap  = input.bool(true, "Dibujar VWAP y bandas",         group = G_VIS)
+i_showTable = input.bool(true, "Mostrar tabla de diagnóstico",  group = G_VIS)
+
+// =============================================================================
+//  2 · VENTANA, RELOJ Y CONTADOR DIARIO
+// =============================================================================
+
+bool   useNY   = i_anchor == "Apertura de NY"
+string tz      = useNY ? "America/New_York" : "Europe/Madrid"
+string sessStr = useNY ? i_sessNY : i_sessMadrid
+int    closeHr = useNY ? i_closeNY : i_closeMadrid
+
+// time() devuelve na fuera de la sesión y gestiona el horario de verano de cada
+// zona por su cuenta, así que la ventana no se descoloca en los cambios de hora.
+bool inWindow    = not na(time(timeframe.period, sessStr, tz))
+bool windowStart = inWindow and not inWindow[1]
+
+// Cierre forzoso: la posición puede correr más allá de la ventana de entradas,
+// pero nunca pasada esta hora.
+int  nowMin   = hour(time, tz) * 60 + minute(time, tz)
+bool forceOut = nowMin >= closeHr * 60
+
+// Contador de operaciones por día natural en la zona de anclaje.
+var int lastDayKey  = na
+var int tradesToday = 0
+int dayKey = year(time, tz) * 10000 + month(time, tz) * 100 + dayofmonth(time, tz)
+if na(lastDayKey) or dayKey != lastDayKey
+    lastDayKey  := dayKey
+    tradesToday := 0
+
+float atr = ta.atr(i_atrLen)
+
+// =============================================================================
+//  3 · ESTRUCTURA DE MERCADO
+// =============================================================================
+//  Devuelve el sesgo (1 alcista / -1 bajista / 0 rango) y los dos últimos
+//  swings confirmados. El sesgo se clasifica como HH+HL (alcista) frente a
+//  LH+LL (bajista); cualquier otra combinación se considera rango.
+
+f_structure(int pl, int pr) =>
+    float ph = ta.pivothigh(pl, pr)
+    float pv = ta.pivotlow(pl, pr)
+    var float sh1 = na
+    var float sh2 = na
+    var float sl1 = na
+    var float sl2 = na
+    if not na(ph)
+        sh2 := sh1
+        sh1 := ph
+    if not na(pv)
+        sl2 := sl1
+        sl1 := pv
+    int bias = 0
+    if not na(sh1) and not na(sh2) and not na(sl1) and not na(sl2)
+        if sh1 > sh2 and sl1 > sl2
+            bias := 1
+        else if sh1 < sh2 and sl1 < sl2
+            bias := -1
+    [bias, sh1, sl1]
+
+[bias5, swHigh, swLow] = f_structure(i_pivL, i_pivR)
+
+// Sesgo de los marcos superiores. request.security debe estar en ámbito global.
+[b1hRaw, sh1hRaw, sl1hRaw] = request.security(syminfo.tickerid, i_tf1, f_structure(i_pivHtfL, i_pivHtfR), lookahead = barmerge.lookahead_off)
+[b4hRaw, sh4hRaw, sl4hRaw] = request.security(syminfo.tickerid, i_tf2, f_structure(i_pivHtfL, i_pivHtfR), lookahead = barmerge.lookahead_off)
+int bias1h = nz(b1hRaw)
+int bias4h = nz(b4hRaw)
+
+// --- BOS y CHoCH sobre el marco actual ---------------------------------------
+//  BOS   = ruptura en la dirección de la tendencia vigente (continuación).
+//  CHoCH = primera ruptura contra la tendencia vigente (cambio de carácter).
+//  Cada nivel de swing solo puede romperse una vez: se recuerda el último swing
+//  roto para no repetir la señal en cada vela mientras el precio siga fuera.
+var int   trend           = 0
+var float lastBrokenHigh  = na
+var float lastBrokenLow   = na
+
+bool bosUp   = false
+bool bosDn   = false
+bool chochUp = false
+bool chochDn = false
+
+if barstate.isconfirmed
+    bool brokeUp = not na(swHigh) and close > swHigh and (na(lastBrokenHigh) or swHigh != lastBrokenHigh)
+    bool brokeDn = not na(swLow)  and close < swLow  and (na(lastBrokenLow)  or swLow  != lastBrokenLow)
+    if brokeUp
+        if trend == -1
+            chochUp := true          // rompe al alza estando bajista
+        else
+            bosUp   := true          // continuación alcista
+        trend          := 1
+        lastBrokenHigh := swHigh
+    else if brokeDn
+        if trend == 1
+            chochDn := true          // rompe a la baja estando alcista
+        else
+            bosDn   := true          // continuación bajista
+        trend         := -1
+        lastBrokenLow := swLow
+
+// =============================================================================
+//  4 · NIVELES DE SESIÓN, BARRIDOS Y VWAP
+// =============================================================================
+
+var float sessHigh = na
+var float sessLow  = na
+var float sessOpen = na
+if windowStart
+    sessHigh := high
+    sessLow  := low
+    sessOpen := open
+else if inWindow
+    sessHigh := math.max(nz(sessHigh, high), high)
+    sessLow  := math.min(nz(sessLow,  low),  low)
+
+// Máximo y mínimo del día anterior: se pide la vela diaria ya cerrada.
+[pdh, pdl] = request.security(syminfo.tickerid, "1D", [high[1], low[1]], lookahead = barmerge.lookahead_off)
+
+// --- Barridos de liquidez ----------------------------------------------------
+//  Mecha que supera un extremo previo y cierra de vuelta dentro. Barrer mínimos
+//  es alcista (han cazado stops de vendidos); barrer máximos, bajista.
+bool sweepBull = barstate.isconfirmed and ((not na(pdl) and low  < pdl    and close > pdl) or
+                                           (not na(swLow)  and low  < swLow  and close > swLow))
+bool sweepBear = barstate.isconfirmed and ((not na(pdh) and high > pdh    and close < pdh) or
+                                           (not na(swHigh) and high > swHigh and close < swHigh))
+
+bool sweepBullRecent = nz(ta.barssince(sweepBull), 999999) <= i_sweepLook
+bool sweepBearRecent = nz(ta.barssince(sweepBear), 999999) <= i_sweepLook
+
+// --- VWAP de sesión con bandas de desviación --------------------------------
+var float cumPV  = 0.0
+var float cumV   = 0.0
+var float cumPV2 = 0.0
+if windowStart
+    cumPV  := 0.0
+    cumV   := 0.0
+    cumPV2 := 0.0
+float srcV = hlc3
+float volV = nz(volume)
+if inWindow
+    cumPV  += srcV * volV
+    cumV   += volV
+    cumPV2 += srcV * srcV * volV
+float vwap   = cumV > 0 ? cumPV / cumV : na
+float vwapSd = cumV > 0 ? math.sqrt(math.max(cumPV2 / cumV - vwap * vwap, 0.0)) : na
+float vwapUp = vwap + i_vwapMult * vwapSd
+float vwapDn = vwap - i_vwapMult * vwapSd
+
+// =============================================================================
+//  5 · FAIR VALUE GAPS
+// =============================================================================
+//  Estados:
+//    0 virgen              · nunca tocada por el precio
+//    1 mitigada parcial    · tocada, con el 50% todavía intacto -> operable
+//    2 consumida           · 50% perforado, ya no sirve en su dirección
+//  Una zona consumida que además se rompe al otro lado + margen se INVIERTE:
+//  cambia de signo, vuelve al estado 0 y pasa a ser operable en sentido
+//  contrario (un FVG bajista roto al alza se convierte en soporte).
+
+type FVG
+    float  top
+    float  bot
+    float  mid
+    int    dir        //  1 = alcista (soporte) · -1 = bajista (resistencia)
+    string tf         // "5m" / "1H" / "4H"
+    int    prio       //  3 = marco mayor · 2 = intermedio · 1 = actual
+    int    state
+    bool   inverted   // ha cambiado de signo alguna vez
+    bool   fired      // ya generó una señal: no vuelve a disparar
+    int    ceBar      // vela en la que se perforó el 50% (disparo)
+    int    bornBar    // vela de creación: en ella no se evalúa mitigación
+    box    bx
+
+var array<FVG> zones = array.new<FVG>()
+
+f_zoneColor(int dir, int state) =>
+    color base = dir == 1 ? color.teal : color.maroon
+    state == 0 ? color.new(base, 80) : state == 1 ? color.new(base, 88) : color.new(color.gray, 92)
+
+f_addZone(float top, float bot, int dir, string tfName, int prio) =>
+    FVG z = FVG.new(top = top, bot = bot, mid = (top + bot) / 2.0, dir = dir, tf = tfName,
+                    prio = prio, state = 0, inverted = false, fired = false, ceBar = -1,
+                    bornBar = bar_index, bx = na)
+    if i_showBoxes
+        z.bx := box.new(bar_index, top, bar_index, bot,
+             border_color = color.new(dir == 1 ? color.teal : color.maroon, 40),
+             bgcolor      = f_zoneColor(dir, 0),
+             border_width = 1)
+    array.push(zones, z)
+    // Poda por antigüedad: se descarta la zona más vieja para acotar memoria.
+    while array.size(zones) > i_maxZones
+        FVG old = array.shift(zones)
+        if not na(old.bx)
+            box.delete(old.bx)
+
+// --- Detección en el marco actual (5m) --------------------------------------
+//  Imbalance de 3 velas según especificación: alcista si low[0] > high[2],
+//  bajista si high[0] < low[2]. Solo sobre velas cerradas.
+if barstate.isconfirmed and not na(atr)
+    float minW = i_fvgMinMult * atr
+    if low > high[2] and (low - high[2]) >= minW
+        f_addZone(low, high[2], 1, "5m", 1)
+    if high < low[2] and (low[2] - high) >= minW
+        f_addZone(low[2], high, -1, "5m", 1)
+
+// --- Detección en marcos superiores -----------------------------------------
+//  Se evalúa con desplazamiento [1]/[3] para que el patrón de 3 velas esté
+//  cerrado en el propio marco superior, y con lookahead_off. Así el FVG del
+//  marco mayor aparece cuando de verdad existe, nunca antes.
+f_htfFvg(int atrLen, float minMult) =>
+    float a    = ta.atr(atrLen)
+    bool  bull = low[1]  > high[3] and (low[1] - high[3]) >= minMult * a
+    bool  bear = high[1] < low[3]  and (low[3] - high[1]) >= minMult * a
+    [time, bull, low[1], high[3], bear, low[3], high[1]]
+
+[t1, bull1, bull1Top, bull1Bot, bear1, bear1Top, bear1Bot] =
+     request.security(syminfo.tickerid, i_tf1, f_htfFvg(i_atrLen, i_fvgMinMult), lookahead = barmerge.lookahead_off)
+[t2, bull2, bull2Top, bull2Bot, bear2, bear2Top, bear2Bot] =
+     request.security(syminfo.tickerid, i_tf2, f_htfFvg(i_atrLen, i_fvgMinMult), lookahead = barmerge.lookahead_off)
+
+bool newHtf1 = not na(t1) and t1 != nz(t1[1], 0)
+bool newHtf2 = not na(t2) and t2 != nz(t2[1], 0)
+
+if barstate.isconfirmed and i_useHtf1 and newHtf1
+    if bull1
+        f_addZone(bull1Top, bull1Bot, 1, "1H", 2)
+    if bear1
+        f_addZone(bear1Top, bear1Bot, -1, "1H", 2)
+
+if barstate.isconfirmed and i_useHtf2 and newHtf2
+    if bull2
+        f_addZone(bull2Top, bull2Bot, 1, "4H", 3)
+    if bear2
+        f_addZone(bear2Top, bear2Bot, -1, "4H", 3)
+
+// --- Máquina de estados y mantenimiento de las cajas ------------------------
+float invM = nz(i_invMargin * atr, 0.0)
+if barstate.isconfirmed and array.size(zones) > 0
+    for i = 0 to array.size(zones) - 1
+        FVG z = array.get(zones, i)
+
+        // En la vela de creación no se evalúa mitigación: el borde del hueco es
+        // por definición el mínimo (o el máximo) de esa vela, así que el test de
+        // toque se cumpliría siempre y la zona nacería ya "mitigada".
+        if z.bornBar != bar_index
+            if z.dir == 1
+                // Soporte: se mitiga de arriba hacia abajo.
+                if z.state == 0 and low <= z.top
+                    z.state := 1
+                if z.state <= 1 and close <= z.mid
+                    z.state := 2
+                    z.ceBar := bar_index              // esta vela es el disparo
+                // Rotura decisiva al otro lado: la zona se invierte y se re-arma.
+                if z.state == 2 and close < z.bot - invM
+                    z.dir      := -1
+                    z.state    := 0
+                    z.inverted := true
+                    z.fired    := false
+                    z.ceBar    := -1                  // anula el disparo de esta vela
+            else
+                // Resistencia: se mitiga de abajo hacia arriba.
+                if z.state == 0 and high >= z.bot
+                    z.state := 1
+                if z.state <= 1 and close >= z.mid
+                    z.state := 2
+                    z.ceBar := bar_index
+                if z.state == 2 and close > z.top + invM
+                    z.dir      := 1
+                    z.state    := 0
+                    z.inverted := true
+                    z.fired    := false
+                    z.ceBar    := -1
+
+        if not na(z.bx)
+            if z.state <= 1
+                box.set_right(z.bx, bar_index + 1)
+            box.set_bgcolor(z.bx, f_zoneColor(z.dir, z.state))
+        array.set(zones, i, z)
+
+// =============================================================================
+//  6 · SELECCIÓN DE LA ZONA QUE DISPARA
+// =============================================================================
+//  Dispara la zona cuyo 50% se ha perforado en ESTA vela y que no había
+//  disparado antes. Si varias coinciden, manda la de marco mayor (prio) y, a
+//  igualdad de marco, la más cercana al precio.
+
+FVG pick = na
+if barstate.isconfirmed and array.size(zones) > 0
+    int   bestPrio = 0
+    float bestDist = 1e12
+    for i = 0 to array.size(zones) - 1
+        FVG z = array.get(zones, i)
+        if z.ceBar == bar_index and not z.fired
+            float d = math.abs(close - z.mid)
+            if z.prio > bestPrio or (z.prio == bestPrio and d < bestDist)
+                bestPrio := z.prio
+                bestDist := d
+                pick     := z
+
+// --- Nivel opuesto más cercano del marco mayor (modo B) ---------------------
+//  Para un largo: el borde inferior de la primera zona bajista de 1H/4H por
+//  encima del precio. Dos pasadas: la primera busca la obstrucción más cercana,
+//  la segunda aplica la prioridad de marco entre las que solapan con ella.
+f_htfOppositeLevel(bool isLong, float from) =>
+    float best  = na
+    int   bestP = 0
+    if array.size(zones) > 0
+        // Pasada 1: distancia mínima.
+        float minD = 1e12
+        for i = 0 to array.size(zones) - 1
+            FVG z = array.get(zones, i)
+            if z.prio >= 2 and z.state <= 1 and (isLong ? z.dir == -1 : z.dir == 1)
+                float near = isLong ? z.bot : z.top
+                if (isLong ? near > from : near < from)
+                    float d = math.abs(near - from)
+                    if d < minD
+                        minD := d
+        // Pasada 2: entre las que están a esa distancia (dentro del margen),
+        // gana la de marco mayor.
+        if minD < 1e12
+            for i = 0 to array.size(zones) - 1
+                FVG z = array.get(zones, i)
+                if z.prio >= 2 and z.state <= 1 and (isLong ? z.dir == -1 : z.dir == 1)
+                    float near = isLong ? z.bot : z.top
+                    if (isLong ? near > from : near < from)
+                        float d = math.abs(near - from)
+                        if d <= minD + invM and z.prio > bestP
+                            bestP := z.prio
+                            best  := near
+    best
+
+// Los niveles de sesión también obstruyen el recorrido.
+f_sessionObstacle(bool isLong, float from) =>
+    float lvl = na
+    if isLong
+        if not na(pdh) and pdh > from
+            lvl := pdh
+        if not na(sessHigh) and sessHigh > from
+            lvl := na(lvl) ? sessHigh : math.min(lvl, sessHigh)
+    else
+        if not na(pdl) and pdl < from
+            lvl := pdl
+        if not na(sessLow) and sessLow < from
+            lvl := na(lvl) ? sessLow : math.max(lvl, sessLow)
+    lvl
+
+// =============================================================================
+//  7 · FILTRO MULTIMARCO
+// =============================================================================
+bool modeA = str.startswith(i_mtfMode, "A")
+bool modeB = str.startswith(i_mtfMode, "B")
+bool modeC = str.startswith(i_mtfMode, "C")
+
+f_mtfOk(bool isLong) =>
+    int  dir = isLong ? 1 : -1
+    bool ok  = true
+    if modeA
+        ok := bias4h == dir
+    else if modeC
+        ok := bias5 == dir and bias1h == dir and bias4h == dir
+    // Modo B: no exige alineación; la restricción es la holgura al nivel del
+    // marco mayor, que se comprueba al construir la operación.
+    ok
+
+// =============================================================================
+//  8 · CONSTRUCCIÓN Y EJECUCIÓN DE LA OPERACIÓN
+// =============================================================================
+
+var float  pendStop   = na
+var float  pendTarget = na
+
+bool flat     = strategy.position_size == 0
+bool canTrade = barstate.isconfirmed and inWindow and not forceOut and flat and tradesToday < i_maxTrades
+
+f_reason(bool isLong, FVG z) =>
+    string s = "FVG " + z.tf + (isLong ? " alcista" : " bajista") + (z.inverted ? " invertido" : "") + " al 50%"
+    s += ", sesgo 5m/" + (bias5  == 1 ? "+" : bias5  == -1 ? "-" : "0")
+    s += " 1H/"        + (bias1h == 1 ? "+" : bias1h == -1 ? "-" : "0")
+    s += " 4H/"        + (bias4h == 1 ? "+" : bias4h == -1 ? "-" : "0")
+    if chochUp or chochDn
+        s += ", CHoCH"
+    else if bosUp or bosDn
+        s += ", BOS"
+    if isLong and sweepBullRecent
+        s += ", barrido de mínimos"
+    if not isLong and sweepBearRecent
+        s += ", barrido de máximos"
+    s
+
+if canTrade and not na(pick) and not na(atr)
+    bool  isLong = pick.dir == 1
+    float entry  = close
+
+    // --- Filtros ------------------------------------------------------------
+    bool okMtf   = f_mtfOk(isLong)
+    bool okVwap  = (not i_useVwap) or na(vwap) or (isLong ? close > vwap : close < vwap)
+    // Sin perseguir precio: fuera de la banda el movimiento ya está extendido.
+    bool okBand  = (not i_vwapBand) or na(vwapUp) or (isLong ? close <= vwapUp : close >= vwapDn)
+    bool okSweep = (not i_reqSweep) or (isLong ? sweepBullRecent : sweepBearRecent)
+
+    // --- Stop estructural ---------------------------------------------------
+    float buf     = i_stopBuf * atr
+    float refSw   = isLong ? swLow : swHigh
+    float refZone = isLong ? pick.bot : pick.top
+    float stopRef = switch i_stopRef
+        "Swing"            => refSw
+        "Borde de la zona" => refZone
+        =>                    isLong ? math.min(nz(refSw, refZone), refZone) : math.max(nz(refSw, refZone), refZone)
+    float stop = na(stopRef) ? na : (isLong ? stopRef - buf : stopRef + buf)
+    // Las órdenes solo existen en la rejilla de ticks. Se redondea alejando el
+    // stop del precio para no calcular el riesgo por debajo del real.
+    if not na(stop)
+        stop := isLong ? math.floor(stop / f_tickPoints) * f_tickPoints
+                       : math.ceil( stop / f_tickPoints) * f_tickPoints
+    float riskPts = na(stop) ? na : (isLong ? entry - stop : stop - entry)
+
+    // Techo duro: si la estructura pide más de lo permitido, no se opera.
+    bool okStop = not na(riskPts) and riskPts > 0 and riskPts <= i_maxStopPts
+
+    if okMtf and okVwap and okBand and okSweep and okStop
+        // --- Tamaño: nunca menos de 1 contrato, nunca más riesgo del fijado
+        int qty = 1
+        if i_scaleUp
+            qty := math.max(1, int(math.floor(i_riskUSD / (riskPts * f_pointValue))))
+        bool okRisk = qty * riskPts * f_pointValue <= i_riskUSD + 1e-6
+
+        // --- Objetivo -------------------------------------------------------
+        float tgtPts  = i_targetUSD / (qty * f_pointValue)
+        float target  = isLong ? entry + tgtPts : entry - tgtPts
+        bool  okClear = true
+
+        if modeB
+            float lvlZone = f_htfOppositeLevel(isLong, entry)
+            float lvlSess = f_sessionObstacle(isLong, entry)
+            float lvl = na(lvlZone) ? lvlSess : na(lvlSess) ? lvlZone :
+                 (isLong ? math.min(lvlZone, lvlSess) : math.max(lvlZone, lvlSess))
+            if not na(lvl)
+                float clearance = isLong ? lvl - entry : entry - lvl
+                okClear := clearance >= i_minClearR * riskPts
+                // El nivel recorta el objetivo si queda por delante de él.
+                target  := isLong ? math.min(target, lvl - invM) : math.max(target, lvl + invM)
+
+        // Objetivo también a la rejilla de ticks, redondeado en contra para no
+        // contar como alcanzado un nivel que en real no se habría tocado.
+        target := isLong ? math.ceil(target / f_tickPoints) * f_tickPoints
+                         : math.floor(target / f_tickPoints) * f_tickPoints
+
+        if okRisk and okClear and (isLong ? target > entry : target < entry)
+            pendStop   := stop
+            pendTarget := target
+
+            string msg = (isLong ? "COMPRA" : "VENTA") + " MGC" +
+                 " | entrada "  + str.tostring(entry,  format.mintick) +
+                 " | stop "     + str.tostring(stop,   format.mintick) +
+                 " | objetivo " + str.tostring(target, format.mintick) +
+                 " | " + str.tostring(qty) + " contrato(s)" +
+                 " | riesgo "   + str.tostring(math.round(qty * riskPts * f_pointValue)) + " USD" +
+                 " | motivo: "  + f_reason(isLong, pick)
+
+            if isLong
+                strategy.entry("L", strategy.long, qty = qty, alert_message = msg)
+                strategy.exit("salida L", from_entry = "L", stop = stop, limit = target, alert_message = "Salida largo MGC")
+            else
+                strategy.entry("S", strategy.short, qty = qty, alert_message = msg)
+                strategy.exit("salida S", from_entry = "S", stop = stop, limit = target, alert_message = "Salida corto MGC")
+
+            alert(msg, alert.freq_once_per_bar_close)
+            pick.fired  := true
+            tradesToday += 1
+
+// Refresco de la protección mientras haya posición abierta.
+if strategy.position_size > 0 and not na(pendStop)
+    strategy.exit("salida L", from_entry = "L", stop = pendStop, limit = pendTarget)
+else if strategy.position_size < 0 and not na(pendStop)
+    strategy.exit("salida S", from_entry = "S", stop = pendStop, limit = pendTarget)
+
+// El cierre forzoso manda sobre stop y objetivo.
+if forceOut and strategy.position_size != 0
+    strategy.close_all(comment = "cierre forzoso")
+
+// =============================================================================
+//  9 · DIBUJO
+// =============================================================================
+plot(i_showVwap and inWindow ? vwap   : na, "VWAP sesión", color = color.new(color.orange, 0), linewidth = 2)
+plot(i_showVwap and inWindow ? vwapUp : na, "VWAP +σ",     color = color.new(color.orange, 60))
+plot(i_showVwap and inWindow ? vwapDn : na, "VWAP -σ",     color = color.new(color.orange, 60))
+
+plot(i_showLvls ? pdh : na, "Máx. día anterior", color = color.new(color.blue, 30), style = plot.style_circles)
+plot(i_showLvls ? pdl : na, "Mín. día anterior", color = color.new(color.blue, 30), style = plot.style_circles)
+plot(i_showLvls and inWindow ? sessHigh : na, "Máx. sesión",     color = color.new(color.purple, 40), style = plot.style_stepline)
+plot(i_showLvls and inWindow ? sessLow  : na, "Mín. sesión",     color = color.new(color.purple, 40), style = plot.style_stepline)
+plot(i_showLvls and inWindow ? sessOpen : na, "Apertura sesión", color = color.new(color.gray,   40), style = plot.style_stepline)
+
+bgcolor(inWindow ? color.new(color.blue, 94) : na, title = "Ventana de operativa")
+
+plotshape(chochUp,   "CHoCH alcista",       shape.triangleup,   location.belowbar, color.new(color.lime,    0), size = size.tiny)
+plotshape(chochDn,   "CHoCH bajista",       shape.triangledown, location.abovebar, color.new(color.red,     0), size = size.tiny)
+plotshape(bosUp,     "BOS alcista",         shape.circle,       location.belowbar, color.new(color.teal,   40), size = size.tiny)
+plotshape(bosDn,     "BOS bajista",         shape.circle,       location.abovebar, color.new(color.maroon, 40), size = size.tiny)
+plotshape(sweepBull, "Barrido de mínimos",  shape.xcross,       location.belowbar, color.new(color.aqua,    0), size = size.tiny)
+plotshape(sweepBear, "Barrido de máximos",  shape.xcross,       location.abovebar, color.new(color.fuchsia, 0), size = size.tiny)
+
+// =============================================================================
+//  10 · TABLA DE DIAGNÓSTICO
+// =============================================================================
+f_biasTxt(int b) => b ==  1 ? "alcista" : b == -1 ? "bajista" : "rango"
+f_biasCol(int b) => b ==  1 ? color.new(color.teal, 0) : b == -1 ? color.new(color.maroon, 0) : color.new(color.gray, 0)
+
+var table diag = table.new(position.top_right, 2, 10, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50))
+
+if i_showTable and barstate.islast
+    float upLvl = na
+    float dnLvl = na
+    string upTxt = "—"
+    string dnTxt = "—"
+    int    nAct  = 0
+
+    if array.size(zones) > 0
+        for i = 0 to array.size(zones) - 1
+            FVG z = array.get(zones, i)
+            if z.state <= 1
+                nAct += 1
+                if z.mid > close and (na(upLvl) or z.mid < upLvl)
+                    upLvl := z.mid
+                    upTxt := z.tf + (z.dir == 1 ? " alc" : " baj") + " @" + str.tostring(z.mid, format.mintick) +
+                             "  (" + str.tostring(na(atr) ? na : (z.mid - close) / atr, "#.##") + " ATR)"
+                if z.mid < close and (na(dnLvl) or z.mid > dnLvl)
+                    dnLvl := z.mid
+                    dnTxt := z.tf + (z.dir == 1 ? " alc" : " baj") + " @" + str.tostring(z.mid, format.mintick) +
+                             "  (" + str.tostring(na(atr) ? na : (close - z.mid) / atr, "#.##") + " ATR)"
+
+    string winTxt = forceOut ? "cierre forzoso" : inWindow ? "abierta" : "cerrada"
+    color  winCol = forceOut ? color.new(color.red, 0) : inWindow ? color.new(color.teal, 0) : color.new(color.gray, 0)
+
+    table.cell(diag, 0, 0, "MGC · diagnóstico", text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
+    table.cell(diag, 1, 0, i_mtfMode,           text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
+
+    table.cell(diag, 0, 1, "Sesgo 5m", text_size = size.small)
+    table.cell(diag, 1, 1, f_biasTxt(bias5),  text_color = f_biasCol(bias5),  text_size = size.small)
+    table.cell(diag, 0, 2, "Sesgo 1H", text_size = size.small)
+    table.cell(diag, 1, 2, f_biasTxt(bias1h), text_color = f_biasCol(bias1h), text_size = size.small)
+    table.cell(diag, 0, 3, "Sesgo 4H", text_size = size.small)
+    table.cell(diag, 1, 3, f_biasTxt(bias4h), text_color = f_biasCol(bias4h), text_size = size.small)
+
+    table.cell(diag, 0, 4, "FVG arriba", text_size = size.small)
+    table.cell(diag, 1, 4, upTxt, text_size = size.small)
+    table.cell(diag, 0, 5, "FVG abajo",  text_size = size.small)
+    table.cell(diag, 1, 5, dnTxt, text_size = size.small)
+
+    table.cell(diag, 0, 6, "ATR(" + str.tostring(i_atrLen) + ")", text_size = size.small)
+    table.cell(diag, 1, 6, str.tostring(atr, "#.##") + " pts", text_size = size.small)
+
+    table.cell(diag, 0, 7, "Operaciones hoy", text_size = size.small)
+    table.cell(diag, 1, 7, str.tostring(tradesToday) + " / " + str.tostring(i_maxTrades), text_size = size.small)
+
+    table.cell(diag, 0, 8, "Ventana", text_size = size.small)
+    table.cell(diag, 1, 8, winTxt, text_color = winCol, text_size = size.small)
+
+    table.cell(diag, 0, 9, "Zonas activas", text_size = size.small)
+    table.cell(diag, 1, 9, str.tostring(nAct) + " de " + str.tostring(array.size(zones)), text_size = size.small)
