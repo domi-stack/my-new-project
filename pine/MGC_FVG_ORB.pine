@@ -57,10 +57,21 @@ f_tickPoints = input.float(0.10, "Tamaño de tick (pts)", group = G_INS, minval 
 
 // --- Ventana de operativa ----------------------------------------------------
 const string G_SES = "Ventana de operativa"
-i_anchor      = input.string("Apertura de NY", "Anclaje de la ventana", options = ["Reloj de Madrid", "Apertura de NY"], group = G_SES,
-     tooltip = "Entre el 25-oct y el 1-nov de 2026 Europa y EE.UU. cambian de hora en fechas distintas: Madrid pasa a UTC+1 con Nueva York " +
-               "todavía en UTC-4. Con 'Reloj de Madrid' operarías esa semana una hora después de la apertura de NY; con 'Apertura de NY' la " +
-               "ventana sigue siempre a la apertura.")
+i_modoHora    = input.string("24 h", "Modo horario", options = ["24 h", "Ventana NY", "Ventana Madrid"], group = G_SES,
+     tooltip = "24 H: señales a cualquier hora, con el día de trading de CME (empieza a las 18:00 ET), parón de entradas alrededor del " +
+               "cierre diario de CME y cierre forzoso antes del fin de semana.\n\n" +
+               "VENTANA NY / VENTANA MADRID: comportamiento anterior, solo dentro de la ventana. 'Ventana NY' con 'Operar solo zonas ALTA' " +
+               "desactivado es la línea base de regresión: debe reproducir exactamente la lista de operaciones de partida.")
+i_horizonte   = input.float(8.0, "Horizonte máximo de la operación (horas)", minval = 0.5, step = 0.5, group = G_SES,
+     tooltip = "Solo en modo 24 h. Lo que ocurra antes, cierre forzoso u horizonte, cierra la posición.")
+i_noticias    = input.string("", "Bloqueo por noticias (HHMM ET, separadas por comas)", group = G_SES,
+     tooltip = "Opcional, vacío por defecto. Sin entradas desde 10 minutos antes hasta 15 minutos después de cada hora indicada. " +
+               "Ejemplo: 0830,1000,1400")
+// El antiguo input de anclaje desaparece: 'Ventana NY' y 'Ventana Madrid' del
+// modo horario ya expresan esa misma elección, y mantenerlo dejaba un input sin
+// efecto. El aviso sigue valiendo: entre el 25-oct y el 1-nov de 2026 Europa y
+// EE.UU. cambian de hora en fechas distintas, así que esa semana la ventana de
+// Madrid cae una hora después de la apertura de Nueva York.
 i_sessMadrid  = input.session("1530-1900", "Ventana (hora de Madrid)", group = G_SES)
 i_sessNY      = input.session("0930-1300", "Ventana (hora de NY)",     group = G_SES)
 i_closeMadrid = input.int(21, "Hora de cierre forzoso (Madrid)", minval = 0, maxval = 23, group = G_SES)
@@ -205,30 +216,81 @@ i_showSig   = input.bool(true, "Etiquetas COMPRA / VENTA",      group = G_VIS,
 //  2 · VENTANA, RELOJ Y CONTADOR DIARIO
 // =============================================================================
 
-bool   useNY   = i_anchor == "Apertura de NY"
+bool modo24 = i_modoHora == "24 h"
+bool modoNY = i_modoHora == "Ventana NY"
+
+// En modo 24 h el reloj de referencia es el de CME (Nueva York). En los modos de
+// ventana manda el anclaje elegido.
+bool   useNY   = modo24 or modoNY
 string tz      = useNY ? "America/New_York" : "Europe/Madrid"
-string sessStr = useNY ? i_sessNY : i_sessMadrid
+string sessStr = modoNY ? i_sessNY : i_sessMadrid
 int    closeHr = useNY ? i_closeNY : i_closeMadrid
 
-// time() devuelve na fuera de la sesión y gestiona el horario de verano de cada
-// zona por su cuenta, así que la ventana no se descoloca en los cambios de hora.
-bool inWindow    = not na(time(timeframe.period, sessStr, tz))
-bool windowStart = inWindow and not inWindow[1]
+int nowMinNY = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+int nowMin   = hour(time, tz) * 60 + minute(time, tz)
 
-// Cierre forzoso: la posición puede correr más allá de la ventana de entradas,
-// pero nunca pasada esta hora.
-int  nowMin   = hour(time, tz) * 60 + minute(time, tz)
-bool forceOut = nowMin >= closeHr * 60
+// --- Parón diario de CME ----------------------------------------------------
+//  El oro en CME para de 17:00 a 18:00 ET. Alrededor del parón la liquidez es
+//  mala, así que las entradas se bloquean de 16:45 a 18:15 ET.
+bool pausaCme = nowMinNY >= 16 * 60 + 45 and nowMinNY < 18 * 60 + 15
 
-// Contador de operaciones por día natural en la zona de anclaje.
-var int lastDayKey  = na
-var int tradesToday = 0
-int dayKey = year(time, tz) * 10000 + month(time, tz) * 100 + dayofmonth(time, tz)
-var float rHoy = 0.0
-if na(lastDayKey) or dayKey != lastDayKey
+// --- Bloqueo por noticias ---------------------------------------------------
+f_enNoticia() =>
+    bool hit = false
+    if str.length(i_noticias) > 0
+        array<string> partes = str.split(i_noticias, ",")
+        for k = 0 to array.size(partes) - 1
+            string p = str.replace_all(array.get(partes, k), " ", "")
+            if str.length(p) == 4
+                float hh = str.tonumber(str.substring(p, 0, 2))
+                float mm = str.tonumber(str.substring(p, 2, 4))
+                if not na(hh) and not na(mm)
+                    int t = int(hh) * 60 + int(mm)
+                    if nowMinNY >= t - 10 and nowMinNY <= t + 15
+                        hit := true
+    hit
+bool enNoticia = f_enNoticia()
+
+// --- Sesión y ventana de entradas -------------------------------------------
+//  inSession  = periodo sobre el que se acumulan VWAP y extremos de sesión.
+//  inWindow   = se admiten entradas.
+//  En modo 24 h la sesión es el día CME completo y las entradas solo se cortan
+//  por el parón, por las noticias o por el cierre forzoso.
+bool enVentanaReloj = not na(time(timeframe.period, sessStr, tz))
+bool inSession = modo24 ? true : enVentanaReloj
+bool inWindow  = modo24 ? (not pausaCme) and (not enNoticia) : enVentanaReloj
+
+// --- Día de trading ---------------------------------------------------------
+//  En modo 24 h el día empieza a las 18:00 ET: se desplaza la marca 6 horas y
+//  se toma la fecha resultante. Así el contador diario, el VWAP y los extremos
+//  de sesión se reinician ahí, no a medianoche.
+int dayKey = 0
+if modo24
+    int tShift = time + 6 * 60 * 60 * 1000
+    dayKey := year(tShift, "America/New_York") * 10000 + month(tShift, "America/New_York") * 100 +
+         dayofmonth(tShift, "America/New_York")
+else
+    dayKey := year(time, tz) * 10000 + month(time, tz) * 100 + dayofmonth(time, tz)
+
+var int   lastDayKey  = na
+var int   tradesToday = 0
+var float rHoy        = 0.0
+bool nuevoDia = na(lastDayKey) or dayKey != lastDayKey
+if nuevoDia
     lastDayKey  := dayKey
     tradesToday := 0
     rHoy        := 0.0
+
+// El arranque de sesión reinicia VWAP y extremos: en modo 24 h es el cambio de
+// día CME; en los modos de ventana, la entrada en la ventana.
+bool windowStart = modo24 ? nuevoDia : (inSession and not inSession[1])
+
+// --- Cierre forzoso ---------------------------------------------------------
+//  Modo 24 h: 16:50 ET todos los días, lo que incluye el viernes, de modo que
+//  nunca queda posición abierta en el fin de semana.
+bool esViernes  = dayofweek(time, "America/New_York") == dayofweek.friday
+bool forceOut   = modo24 ? (nowMinNY >= 16 * 60 + 50) : (nowMin >= closeHr * 60)
+bool forceViernes = modo24 and esViernes and nowMinNY >= 16 * 60 + 50
 
 float atr = ta.atr(i_atrLen)
 
@@ -311,7 +373,7 @@ if windowStart
     sessHigh := high
     sessLow  := low
     sessOpen := open
-else if inWindow
+else if inSession
     sessHigh := math.max(nz(sessHigh, high), high)
     sessLow  := math.min(nz(sessLow,  low),  low)
 
@@ -329,7 +391,7 @@ bool confBar = barstate.isconfirmed
 bool swpPdl = confBar and not na(pdl) and low  < pdl  and close > pdl
 bool swpPdh = confBar and not na(pdh) and high > pdh  and close < pdh
 
-bool sessRef  = inWindow and not windowStart
+bool sessRef  = inSession and not windowStart
 bool swpSesLo = confBar and sessRef and not na(sessLow[1])  and low  < sessLow[1]  and close > sessLow[1]
 bool swpSesHi = confBar and sessRef and not na(sessHigh[1]) and high > sessHigh[1] and close < sessHigh[1]
 
@@ -361,7 +423,7 @@ if windowStart
     cumPV2 := 0.0
 float srcV = hlc3
 float volV = nz(volume)
-if inWindow
+if inSession
     cumPV  += srcV * volV
     cumV   += volV
     cumPV2 += srcV * srcV * volV
@@ -913,6 +975,7 @@ f_contarVetos(int m) =>
 var float  pendStop   = na
 var float  pendTarget = na
 var string openId     = ""   // id del disparador de la posición abierta
+var int    openTime   = na   // marca de entrada, para el horizonte máximo
 
 // Todos los stops estructurales calculados, operados o no. Es el dato que dice
 // si el techo de puntos es el cuello de botella (fase 5).
@@ -1039,7 +1102,8 @@ if setDir != 0 and confBar and not na(atr)
             strategy.exit("salida " + trigId, from_entry = trigId, stop = stop, limit = target,
                  comment_loss = "SL " + trigId, comment_profit = "TP " + trigId,
                  alert_message = (isLong ? "Salida largo MGC" : "Salida corto MGC"))
-            openId := trigId
+            openId   := trigId
+            openTime := time
 
             // Registro de la operación: el riesgo planificado se guarda aquí y
             // no se recalcula después, para que R sea PnL / riesgo real.
@@ -1072,9 +1136,15 @@ if setDir != 0 and confBar and not na(atr)
 if strategy.position_size != 0 and not na(pendStop) and openId != ""
     strategy.exit("salida " + openId, from_entry = openId, stop = pendStop, limit = pendTarget)
 
-// El cierre forzoso manda sobre stop y objetivo.
-if forceOut and strategy.position_size != 0
-    strategy.close_all(comment = "cierre forzoso")
+// El cierre forzoso manda sobre stop y objetivo. En modo 24 h se le suma el
+// horizonte máximo: lo que ocurra antes de los dos cierra la posición.
+bool porHorizonte = modo24 and strategy.position_size != 0 and not na(openTime) and
+     (time - openTime) >= i_horizonte * 3600000
+
+if strategy.position_size != 0 and (forceOut or porHorizonte)
+    strategy.close_all(comment = porHorizonte ? "horizonte" :
+         forceViernes ? "cierre viernes" : "cierre forzoso")
+    openTime := na
 
 // Resultado del día en R. Se acumula al cerrarse cada operación usando el
 // riesgo PLANIFICADO que se guardó al entrar, no uno recalculado.
@@ -1092,9 +1162,9 @@ if strategy.closedtrades > nz(strategy.closedtrades[1], 0)
 //  destacadas. Nada de esto se deja de calcular: solo se deja de dibujar.
 bool verExtras = not i_soloAlta
 
-plot(verExtras and i_showVwap and inWindow ? vwap   : na, "VWAP sesión", color = color.new(color.orange, 0), linewidth = 2)
-plot(verExtras and i_showVwap and inWindow ? vwapUp : na, "VWAP +σ",     color = color.new(color.orange, 60))
-plot(verExtras and i_showVwap and inWindow ? vwapDn : na, "VWAP -σ",     color = color.new(color.orange, 60))
+plot(verExtras and i_showVwap and inSession ? vwap   : na, "VWAP sesión", color = color.new(color.orange, 0), linewidth = 2)
+plot(verExtras and i_showVwap and inSession ? vwapUp : na, "VWAP +σ",     color = color.new(color.orange, 60))
+plot(verExtras and i_showVwap and inSession ? vwapDn : na, "VWAP -σ",     color = color.new(color.orange, 60))
 
 // PDH y PDL: única referencia de contexto que sobrevive al modo limpio, en gris
 // fino y sin etiqueta.
@@ -1104,11 +1174,11 @@ plot(i_showLvls ? pdh : na, "Máx. día anterior",
 plot(i_showLvls ? pdl : na, "Mín. día anterior",
      color = i_soloAlta ? color.new(color.gray, 45) : color.new(color.blue, 30),
      style = i_soloAlta ? plot.style_linebr : plot.style_circles, linewidth = 1)
-plot(verExtras and i_showLvls and inWindow ? sessHigh : na, "Máx. sesión",     color = color.new(color.purple, 40), style = plot.style_stepline)
-plot(verExtras and i_showLvls and inWindow ? sessLow  : na, "Mín. sesión",     color = color.new(color.purple, 40), style = plot.style_stepline)
-plot(verExtras and i_showLvls and inWindow ? sessOpen : na, "Apertura sesión", color = color.new(color.gray,   40), style = plot.style_stepline)
+plot(verExtras and i_showLvls and inSession ? sessHigh : na, "Máx. sesión",     color = color.new(color.purple, 40), style = plot.style_stepline)
+plot(verExtras and i_showLvls and inSession ? sessLow  : na, "Mín. sesión",     color = color.new(color.purple, 40), style = plot.style_stepline)
+plot(verExtras and i_showLvls and inSession ? sessOpen : na, "Apertura sesión", color = color.new(color.gray,   40), style = plot.style_stepline)
 
-bgcolor(verExtras and inWindow ? color.new(color.blue, 94) : na, title = "Ventana de operativa")
+bgcolor(verExtras and inSession ? color.new(color.blue, 94) : na, title = "Ventana de operativa")
 
 plotshape(verExtras and chochUp,   "CHoCH alcista",      shape.triangleup,   location.belowbar, color.new(color.lime,    0), size = size.tiny)
 plotshape(verExtras and chochDn,   "CHoCH bajista",      shape.triangledown, location.abovebar, color.new(color.red,     0), size = size.tiny)
