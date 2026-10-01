@@ -1443,6 +1443,10 @@ f_contarVetos(int m) =>
 
 var float  pendStop   = na
 var float  pendTarget = na
+// Etiquetas de señal con cola FIFO propia, para que el recolector de Pine no se
+// lleve por delante los pools creados al principio del gráfico.
+var array<label> lblSenales = array.new<label>()
+
 var string openId     = ""   // id del disparador de la posición abierta
 var int    openTime   = na   // marca de entrada, para el horizonte máximo
 
@@ -1623,8 +1627,15 @@ if setDir != 0 and confBar and not na(atr)
 
             // Etiqueta en el gráfico: COMPRA en verde debajo, VENTA en rojo
             // encima. El detalle completo va en el tooltip para no ensuciar.
+            //
+            //  CON COLA PROPIA. Sin ella, en un backtest largo el total de
+            //  labels pasa del cupo de Pine y Pine borra las MÁS ANTIGUAS, que
+            //  son precisamente los pools creados en barstate.isfirst
+            //  (tipScore) y la etiqueta de acción: desaparecerían justo en la
+            //  última vela, donde sí se miran. Purgando nosotros las señales
+            //  viejas, el cupo no se alcanza y los pools sobreviven.
             if i_showSig
-                label.new(
+                array.push(lblSenales, label.new(
                      x         = bar_index,
                      y         = isLong ? low - atr * 0.7 : high + atr * 0.7,
                      text      = isLong ? "COMPRA" : "VENTA",
@@ -1632,7 +1643,9 @@ if setDir != 0 and confBar and not na(atr)
                      textcolor = color.white,
                      style     = isLong ? label.style_label_up : label.style_label_down,
                      size      = size.normal,
-                     tooltip   = msg)
+                     tooltip   = msg))
+                while array.size(lblSenales) > 200
+                    label.delete(array.shift(lblSenales))
 
             alert(msg, alert.freq_once_per_bar_close)
             // Solo el setup de FVG tiene zona que marcar como disparada; en un
