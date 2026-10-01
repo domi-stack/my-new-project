@@ -162,6 +162,30 @@ i_minScore  = input.int(0, "Fuerza mínima para operar (0 = desactivado)", minva
                "y alimenta el texto de acción, pero no veta nada. No lo subas hasta haber comprobado que el tier FUERTE supera de verdad al " +
                "DÉBIL en esperanza, con al menos 40 operaciones en cada uno.")
 
+// --- Modo de gráfico limpio (v2.1 §3) ---------------------------------------
+const string G_LIM = "Solo alta probabilidad"
+i_soloAlta  = input.bool(true, "Modo solo alta probabilidad", group = G_LIM,
+     tooltip = "Deja en el gráfico como mucho una zona por encima y una por debajo del precio, en el tono más oscuro, y oculta todo lo demás. " +
+               "Lo oculto sigue calculándose: solo deja de dibujarse.")
+i_altaPorLado = input.int(1, "Zonas visibles por lado", minval = 1, maxval = 3, group = G_LIM)
+
+// ATENCIÓN · SIN CALIBRAR
+//  El documento v2.1 define "alta probabilidad" con el histórico (su §1), no con
+//  pesos inventados, y su §1.7.3 prohíbe generar el bloque de constantes si
+//  ningún cubo llega a ALTA. Esa calibración NO está hecha: requiere una prueba
+//  de paridad contra lo que dibuja Pine, que no se puede ejecutar aquí.
+//  Mientras no exista, la selección de zonas ordena por PRIORIDAD ESTRUCTURAL
+//  (marco mayor primero, luego estado virgen, luego cercanía). Es un orden, no
+//  una probabilidad, y la tabla lo declara como SIN CALIBRAR. No se muestra
+//  ningún porcentaje para no dar por medido algo que no lo está.
+bool  CALIBRADO     = false
+const string CAL_TXT = "SIN CALIBRAR · orden estructural"
+
+i_soloAltaOper = input.bool(false, "Operar solo zonas ALTA", group = G_LIM,
+     tooltip = "Desactivado a la fuerza mientras no haya calibración. Si se activara sin tabla calibrada no habría ninguna zona que " +
+               "cumpliera el criterio y vetaría TODAS las entradas, que es peor que no filtrar. Su bit y sus contadores ya están en la " +
+               "máscara de vetos, listos para cuando exista la tabla.")
+
 // --- Visual ------------------------------------------------------------------
 const string G_VIS = "Visual"
 i_showBoxes = input.bool(true, "Dibujar zonas",                 group = G_VIS)
@@ -200,9 +224,11 @@ bool forceOut = nowMin >= closeHr * 60
 var int lastDayKey  = na
 var int tradesToday = 0
 int dayKey = year(time, tz) * 10000 + month(time, tz) * 100 + dayofmonth(time, tz)
+var float rHoy = 0.0
 if na(lastDayKey) or dayKey != lastDayKey
     lastDayKey  := dayKey
     tradesToday := 0
+    rHoy        := 0.0
 
 float atr = ta.atr(i_atrLen)
 
@@ -558,6 +584,96 @@ if barstate.isconfirmed and array.size(zones) > 0
         array.set(zones, i, z)
 
 // =============================================================================
+//  5b · ZONAS VISIBLES · modo solo alta probabilidad (v2.1 §3)
+// =============================================================================
+//  Deja a la vista como mucho `i_altaPorLado` zonas por encima y otras tantas
+//  por debajo del precio, en el tono más oscuro del gráfico, y oculta el resto
+//  MUTANDO su caja: la zona sigue viva en el estado, solo deja de dibujarse.
+//
+//  El orden es estructural (marco mayor, luego virgen, luego cercanía) porque
+//  la calibración de v2.1 §1 no está hecha. No se muestra ningún porcentaje:
+//  eso sería dar por medido algo que no lo está.
+
+f_ocultarZona(Zona z) =>
+    if not na(z.bx)
+        box.set_bgcolor(z.bx, color.new(color.gray, 100))
+        box.set_border_color(z.bx, color.new(color.gray, 100))
+        box.set_text(z.bx, "")
+
+f_destacarZona(Zona z) =>
+    if not na(z.bx)
+        color col = z.dir == 1 ? color.green : color.red
+        box.set_bgcolor(z.bx, color.new(col, 25))
+        box.set_border_color(z.bx, color.new(col, 0))
+        box.set_border_width(z.bx, 2)
+        box.set_border_style(z.bx, line.style_solid)
+        box.set_text(z.bx, (z.dir == 1 ? "COMPRA" : "VENTA") + " · " + z.tf +
+             (z.inverted ? " · inv" : "") + " · " + CAL_TXT)
+        box.set_text_color(z.bx, color.new(col, 0))
+        box.set_text_size(z.bx, size.normal)
+
+// Pool fijo de líneas para el CE de las zonas destacadas: se crean una vez y se
+// mueven, nunca se borran y se recrean.
+var array<line> ceLines = array.new<line>()
+if barstate.isfirst
+    for k = 0 to 5
+        array.push(ceLines, line.new(bar_index, close, bar_index, close,
+             color = color.new(color.gray, 100), width = 1, style = line.style_solid))
+
+// Índice de la zona destacada más cercana por lado, para la tabla reducida.
+var int altaArriba = -1
+var int altaAbajo  = -1
+
+if i_soloAlta and barstate.isconfirmed and array.size(zones) > 0
+    altaArriba := -1
+    altaAbajo  := -1
+    for i = 0 to array.size(zones) - 1
+        f_ocultarZona(array.get(zones, i))
+    for k = 0 to array.size(ceLines) - 1
+        line.set_color(array.get(ceLines, k), color.new(color.gray, 100))
+
+    array<int> elegidas = array.new_int()
+    int slot = 0
+    for lado = -1 to 1 by 2
+        for k = 1 to i_altaPorLado
+            int   bestI = -1
+            int   bestP = -1
+            int   bestS = -1
+            float bestD = 1e12
+            for i = 0 to array.size(zones) - 1
+                Zona z = array.get(zones, i)
+                bool libre    = not array.includes(elegidas, i)
+                bool operable = z.state <= 1 and not z.fired
+                bool enLado   = lado == 1 ? z.mid > close : z.mid < close
+                if libre and operable and enLado
+                    float d   = math.abs(z.mid - close)
+                    int   est = z.state == 0 ? 1 : 0        // virgen por delante
+                    bool mejor = z.prio > bestP or
+                         (z.prio == bestP and est > bestS) or
+                         (z.prio == bestP and est == bestS and d < bestD)
+                    if mejor
+                        bestI := i
+                        bestP := z.prio
+                        bestS := est
+                        bestD := d
+            if bestI >= 0
+                array.push(elegidas, bestI)
+                Zona zb = array.get(zones, bestI)
+                f_destacarZona(zb)
+                if k == 1
+                    if lado == 1
+                        altaArriba := bestI
+                    else
+                        altaAbajo := bestI
+                // Línea del CE
+                if slot < array.size(ceLines)
+                    line ln = array.get(ceLines, slot)
+                    line.set_xy1(ln, bar_index - 30, zb.mid)
+                    line.set_xy2(ln, bar_index + 3,  zb.mid)
+                    line.set_color(ln, color.new(zb.dir == 1 ? color.green : color.red, 20))
+                    slot += 1
+
+// =============================================================================
 //  6 · SELECCIÓN DE LA ZONA QUE DISPARA
 // =============================================================================
 //  Dispara la zona cuyo 50% se ha perforado en ESTA vela y que no había
@@ -676,7 +792,8 @@ const int V_STOP    = 128
 const int V_HOLGURA = 256
 const int V_FUERZA  = 512
 const int V_ADR     = 1024
-const int N_VETOS   = 11
+const int V_NOALTA  = 2048
+const int N_VETOS   = 12
 
 var array<int> vetoBloq = array.new_int(N_VETOS, 0)
 var array<int> vetoExcl = array.new_int(N_VETOS, 0)
@@ -696,7 +813,8 @@ f_vetoName(int idx) =>
         7  => "stop > techo"
         8  => "holgura"
         9  => "fuerza mínima"
-        => "ADR agotado"
+        10 => "ADR agotado"
+        => "no ALTA"
 
 // Obstrucción combinada: zonas del marco mayor y, si se han activado, niveles
 // de sesión. Una sola puerta para que la máscara y el objetivo lean lo mismo.
@@ -704,6 +822,23 @@ f_nivelObstruccion(bool isLong, float from) =>
     float lz = f_htfOppositeLevel(isLong, from)
     float ls = f_sessionObstacle(isLong, from)
     na(lz) ? ls : na(ls) ? lz : (isLong ? math.min(lz, ls) : math.max(lz, ls))
+
+// Regla del stop de una zona, en un solo sitio: la usa la ejecución real y la
+// máscara teórica de la capa de acción, para que no existan dos copias.
+f_stopDeZona(Zona z) =>
+    bool  isLong  = z.dir == 1
+    float buf     = i_stopBuf * atr
+    float refSw   = isLong ? swLow : swHigh
+    float refZone = isLong ? z.bot : z.top
+    float refMid  = z.mid
+    float sr = switch i_stopRef
+        "Swing"            => refSw
+        "50% de la zona"   => refMid
+        "Borde de la zona" => refZone
+        =>                    isLong ? math.min(nz(refSw, refZone), refZone) : math.max(nz(refSw, refZone), refZone)
+    float s = na(sr) ? na : (isLong ? sr - buf : sr + buf)
+    na(s) ? na : (isLong ? math.floor(s / f_tickPoints) * f_tickPoints
+                         : math.ceil( s / f_tickPoints) * f_tickPoints)
 
 // La máscara. `zScore` solo entra por el veto de fuerza mínima, que es el único
 // punto donde la puntuación influye en una decisión de trading.
@@ -750,6 +885,11 @@ f_mascara(int dir, float entrada, float stop, bool esFvg, int zScore) =>
 
     // V_ADR se rellena en la fase 4. Reservado aquí para no volver a tocar la
     // máscara después.
+
+    // Solo zonas ALTA: solo puede vetar si existe tabla calibrada. Sin ella el
+    // input está forzado a off y este bit nunca se activa, porque vetaría todo.
+    if i_soloAltaOper and CALIBRADO and esFvg and zScore < 1
+        m += V_NOALTA
 
     m
 
@@ -812,28 +952,18 @@ if setDir != 0 and confBar and not na(atr)
     float entry  = close
 
     // --- Stop ---------------------------------------------------------------
-    float buf     = i_stopBuf * atr
-    float stopRef = na
+    //  El FVG usa la regla compartida f_stopDeZona; el barrido pone el stop en
+    //  su propia mecha, que es lo que invalida la lectura si el precio vuelve
+    //  más allá de ella.
+    float stop = na
     if isFvg
-        float refSw   = isLong ? swLow : swHigh
-        float refZone = isLong ? pick.bot : pick.top
-        float refMid = pick.mid
-        stopRef := switch i_stopRef
-            "Swing"            => refSw
-            "50% de la zona"   => refMid
-            "Borde de la zona" => refZone
-            =>                    isLong ? math.min(nz(refSw, refZone), refZone) : math.max(nz(refSw, refZone), refZone)
+        stop := f_stopDeZona(pick)
     else
-        // La mecha del barrido es la invalidación: si el precio vuelve más allá
-        // de ella, la lectura del barrido era falsa.
-        stopRef := isLong ? low : high
+        float buf = i_stopBuf * atr
+        float sr  = isLong ? low - buf : high + buf
+        stop := isLong ? math.floor(sr / f_tickPoints) * f_tickPoints
+                       : math.ceil( sr / f_tickPoints) * f_tickPoints
 
-    float stop = na(stopRef) ? na : (isLong ? stopRef - buf : stopRef + buf)
-    // Las órdenes solo existen en la rejilla de ticks. Se redondea alejando el
-    // stop del precio para no calcular el riesgo por debajo del real.
-    if not na(stop)
-        stop := isLong ? math.floor(stop / f_tickPoints) * f_tickPoints
-                       : math.ceil( stop / f_tickPoints) * f_tickPoints
     float riskPts = na(stop) ? na : (isLong ? entry - stop : stop - entry)
 
     if not na(riskPts) and riskPts > 0
@@ -946,27 +1076,46 @@ if strategy.position_size != 0 and not na(pendStop) and openId != ""
 if forceOut and strategy.position_size != 0
     strategy.close_all(comment = "cierre forzoso")
 
+// Resultado del día en R. Se acumula al cerrarse cada operación usando el
+// riesgo PLANIFICADO que se guardó al entrar, no uno recalculado.
+if strategy.closedtrades > nz(strategy.closedtrades[1], 0)
+    int ci = strategy.closedtrades - 1
+    if ci >= 0 and ci < array.size(ops)
+        float riesgoPlan = array.get(ops, ci).riesgoUSD
+        if riesgoPlan > 0
+            rHoy += strategy.closedtrades.profit(ci) / riesgoPlan
+
 // =============================================================================
 //  9 · DIBUJO
 // =============================================================================
-plot(i_showVwap and inWindow ? vwap   : na, "VWAP sesión", color = color.new(color.orange, 0), linewidth = 2)
-plot(i_showVwap and inWindow ? vwapUp : na, "VWAP +σ",     color = color.new(color.orange, 60))
-plot(i_showVwap and inWindow ? vwapDn : na, "VWAP -σ",     color = color.new(color.orange, 60))
+//  En modo solo alta probabilidad se oculta todo lo que compita con las zonas
+//  destacadas. Nada de esto se deja de calcular: solo se deja de dibujar.
+bool verExtras = not i_soloAlta
 
-plot(i_showLvls ? pdh : na, "Máx. día anterior", color = color.new(color.blue, 30), style = plot.style_circles)
-plot(i_showLvls ? pdl : na, "Mín. día anterior", color = color.new(color.blue, 30), style = plot.style_circles)
-plot(i_showLvls and inWindow ? sessHigh : na, "Máx. sesión",     color = color.new(color.purple, 40), style = plot.style_stepline)
-plot(i_showLvls and inWindow ? sessLow  : na, "Mín. sesión",     color = color.new(color.purple, 40), style = plot.style_stepline)
-plot(i_showLvls and inWindow ? sessOpen : na, "Apertura sesión", color = color.new(color.gray,   40), style = plot.style_stepline)
+plot(verExtras and i_showVwap and inWindow ? vwap   : na, "VWAP sesión", color = color.new(color.orange, 0), linewidth = 2)
+plot(verExtras and i_showVwap and inWindow ? vwapUp : na, "VWAP +σ",     color = color.new(color.orange, 60))
+plot(verExtras and i_showVwap and inWindow ? vwapDn : na, "VWAP -σ",     color = color.new(color.orange, 60))
 
-bgcolor(inWindow ? color.new(color.blue, 94) : na, title = "Ventana de operativa")
+// PDH y PDL: única referencia de contexto que sobrevive al modo limpio, en gris
+// fino y sin etiqueta.
+plot(i_showLvls ? pdh : na, "Máx. día anterior",
+     color = i_soloAlta ? color.new(color.gray, 45) : color.new(color.blue, 30),
+     style = i_soloAlta ? plot.style_linebr : plot.style_circles, linewidth = 1)
+plot(i_showLvls ? pdl : na, "Mín. día anterior",
+     color = i_soloAlta ? color.new(color.gray, 45) : color.new(color.blue, 30),
+     style = i_soloAlta ? plot.style_linebr : plot.style_circles, linewidth = 1)
+plot(verExtras and i_showLvls and inWindow ? sessHigh : na, "Máx. sesión",     color = color.new(color.purple, 40), style = plot.style_stepline)
+plot(verExtras and i_showLvls and inWindow ? sessLow  : na, "Mín. sesión",     color = color.new(color.purple, 40), style = plot.style_stepline)
+plot(verExtras and i_showLvls and inWindow ? sessOpen : na, "Apertura sesión", color = color.new(color.gray,   40), style = plot.style_stepline)
 
-plotshape(chochUp,   "CHoCH alcista",       shape.triangleup,   location.belowbar, color.new(color.lime,    0), size = size.tiny)
-plotshape(chochDn,   "CHoCH bajista",       shape.triangledown, location.abovebar, color.new(color.red,     0), size = size.tiny)
-plotshape(bosUp,     "BOS alcista",         shape.circle,       location.belowbar, color.new(color.teal,   40), size = size.tiny)
-plotshape(bosDn,     "BOS bajista",         shape.circle,       location.abovebar, color.new(color.maroon, 40), size = size.tiny)
-plotshape(sweepBull, "Barrido de mínimos",  shape.xcross,       location.belowbar, color.new(color.aqua,    0), size = size.tiny)
-plotshape(sweepBear, "Barrido de máximos",  shape.xcross,       location.abovebar, color.new(color.fuchsia, 0), size = size.tiny)
+bgcolor(verExtras and inWindow ? color.new(color.blue, 94) : na, title = "Ventana de operativa")
+
+plotshape(verExtras and chochUp,   "CHoCH alcista",      shape.triangleup,   location.belowbar, color.new(color.lime,    0), size = size.tiny)
+plotshape(verExtras and chochDn,   "CHoCH bajista",      shape.triangledown, location.abovebar, color.new(color.red,     0), size = size.tiny)
+plotshape(verExtras and bosUp,     "BOS alcista",        shape.circle,       location.belowbar, color.new(color.teal,   40), size = size.tiny)
+plotshape(verExtras and bosDn,     "BOS bajista",        shape.circle,       location.abovebar, color.new(color.maroon, 40), size = size.tiny)
+plotshape(verExtras and sweepBull, "Barrido de mínimos", shape.xcross,       location.belowbar, color.new(color.aqua,    0), size = size.tiny)
+plotshape(verExtras and sweepBear, "Barrido de máximos", shape.xcross,       location.abovebar, color.new(color.fuchsia, 0), size = size.tiny)
 
 // =============================================================================
 //  10 · TABLA DE DIAGNÓSTICO
@@ -976,7 +1125,82 @@ f_biasCol(int b) => b ==  1 ? color.new(color.teal, 0) : b == -1 ? color.new(col
 
 var table diag = table.new(position.top_right, 2, 13, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50))
 
-if i_showTable and barstate.islast
+// =============================================================================
+//  10b · TABLA REDUCIDA · modo solo alta probabilidad (v2.1 §3.1.5)
+// =============================================================================
+var table limpia = table.new(position.top_right, 2, 4, border_width = 1,
+     frame_width = 1, frame_color = color.new(color.gray, 40))
+
+if i_soloAlta and barstate.islast
+    // Zona destacada más cercana al precio, de las dos que el modo deja ver.
+    float dArr = 1e12
+    float dAba = 1e12
+    if altaArriba >= 0 and altaArriba < array.size(zones)
+        dArr := math.abs(array.get(zones, altaArriba).mid - close)
+    if altaAbajo >= 0 and altaAbajo < array.size(zones)
+        dAba := math.abs(array.get(zones, altaAbajo).mid - close)
+    int  zi      = dArr <= dAba ? altaArriba : altaAbajo
+    bool hayZona = zi >= 0 and zi < array.size(zones)
+
+    string zTxt  = "—"
+    float  zDist = na
+    int    zDir  = 0
+    int    mTeo  = 0
+    if hayZona
+        Zona z = array.get(zones, zi)
+        zDir  := z.dir
+        zDist := na(atr) ? na : math.abs(z.mid - close) / atr
+        zTxt  := (z.dir == 1 ? "COMPRA" : "VENTA") + " · " + z.tf + " · " +
+             str.tostring(zDist, "#.##") + " ATR"
+        // Máscara TEÓRICA: los mismos filtros, evaluados como si la entrada
+        // fuera en el CE de esta zona. Reutiliza la función, no la duplica.
+        mTeo := f_mascara(z.dir, z.mid, f_stopDeZona(z), true, 100)
+
+    // Estado de acción, por prioridad: el primero que aplique gana.
+    string acc    = "NO OPERAR"
+    color  accCol = color.new(color.gray, 25)
+    if strategy.position_size != 0
+        acc    := "GESTIONAR " + (strategy.position_size > 0 ? "LARGO" : "CORTO") +
+             " · " + str.tostring(rHoy, "+#.##") + "R hoy"
+        accCol := color.new(color.blue, 15)
+    else if setDir != 0
+        acc    := "EJECUTAR " + (setDir == 1 ? "COMPRA" : "VENTA")
+        accCol := setDir == 1 ? color.new(color.green, 0) : color.new(color.red, 0)
+    else if not hayZona
+        acc    := "NO OPERAR · sin zona operable"
+        accCol := color.new(color.gray, 25)
+    else if f_vetoTiene(mTeo, V_DIARIO)
+        acc    := "NO OPERAR · límite diario"
+        accCol := color.new(color.gray, 25)
+    else if f_vetoTiene(mTeo, V_VENTANA)
+        acc    := "NO OPERAR · fuera de ventana"
+        accCol := color.new(color.gray, 25)
+    else if not na(zDist) and zDist <= 2 and mTeo == 0
+        acc    := "PREPARAR " + (zDir == 1 ? "COMPRA" : "VENTA")
+        accCol := zDir == 1 ? color.new(color.green, 30) : color.new(color.red, 30)
+    else if not na(zDist) and zDist <= 2
+        acc    := "ESPERAR CONFIRMACIÓN"
+        accCol := color.new(color.orange, 20)
+    else
+        acc    := "VIGILAR " + (zDir == 1 ? "COMPRA" : "VENTA")
+        accCol := zDir == 1 ? color.new(color.green, 60) : color.new(color.red, 60)
+
+    table.cell(limpia, 0, 0, acc, text_color = color.white, bgcolor = accCol,
+         text_size = size.large, text_halign = text.align_center)
+    table.cell(limpia, 1, 0, "", bgcolor = accCol)
+
+    table.cell(limpia, 0, 1, "Zona más cercana", text_size = size.small)
+    table.cell(limpia, 1, 1, zTxt, text_size = size.small,
+         text_color = zDir == 1 ? color.new(color.green, 0) : zDir == -1 ? color.new(color.red, 0) : chart.fg_color)
+
+    table.cell(limpia, 0, 2, "Hoy", text_size = size.small)
+    table.cell(limpia, 1, 2, str.tostring(tradesToday) + " / " + str.tostring(i_maxTrades) +
+         " · " + str.tostring(rHoy, "+#.##") + "R", text_size = size.small)
+
+    table.cell(limpia, 0, 3, "Calibración", text_size = size.small)
+    table.cell(limpia, 1, 3, CAL_TXT, text_size = size.small, text_color = color.new(color.orange, 0))
+
+if i_showTable and verExtras and barstate.islast
     float upLvl = na
     float dnLvl = na
     string upTxt = "—"
