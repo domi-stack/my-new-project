@@ -59,11 +59,22 @@ f_tickPoints = input.float(0.10, "Tamaño de tick (pts)", group = G_INS, minval 
 
 // --- Ventana de operativa ----------------------------------------------------
 const string G_SES = "Ventana de operativa"
-i_modoHora    = input.string("24 h", "Modo horario", options = ["24 h", "Ventana NY", "Ventana Madrid"], group = G_SES,
-     tooltip = "24 H: señales a cualquier hora, con el día de trading de CME (empieza a las 18:00 ET), parón de entradas alrededor del " +
-               "cierre diario de CME y cierre forzoso antes del fin de semana.\n\n" +
-               "VENTANA NY / VENTANA MADRID: comportamiento anterior, solo dentro de la ventana. 'Ventana NY' con 'Operar solo zonas ALTA' " +
-               "desactivado es la línea base de regresión: debe reproducir exactamente la lista de operaciones de partida.")
+//  POR QUÉ 'VENTANA NY' ES EL DEFECTO Y NO '24 H'.
+//  El día de trading CME empieza a las 18:00 ET, o sea a medianoche en Madrid.
+//  Con el límite de 1 operación al día y sin calibración que distinga sesiones,
+//  en modo 24 h la operación del día se la lleva la primera señal que aparezca,
+//  normalmente en Asia, y cuando llega Nueva York (la sesión con más volumen)
+//  el cupo ya está gastado. El modo 24 h queda disponible para OBSERVAR, no
+//  para operar. Volverá a ser el defecto solo si la calibración demuestra que
+//  las sesiones fuera de NY aportan ventaja.
+i_modoHora    = input.string("Ventana NY", "Modo horario", options = ["24 h", "Ventana NY", "Ventana Madrid"], group = G_SES,
+     tooltip = "VENTANA NY es el defecto a propósito: con 1 operación al día y sin calibración, el modo 24 h gasta el cupo en la primera " +
+               "señal del día CME (que empieza a las 18:00 ET, medianoche en Madrid) y bloquea la sesión de Nueva York, que es la de más " +
+               "volumen. Usa 24 h para observar, no para operar, hasta que la calibración diga lo contrario.\n\n" +
+               "24 H: señales a cualquier hora, con el día de trading de CME, parón de entradas alrededor del cierre diario y cierre " +
+               "forzoso antes del fin de semana.\n\n" +
+               "'Ventana NY' con 'Operar solo zonas ALTA' desactivado y los disparadores nuevos apagados es la línea base de regresión " +
+               "v2.2 (ver backtests/README.md).")
 i_horizonte   = input.float(8.0, "Horizonte máximo de la operación (horas)", minval = 0.5, step = 0.5, group = G_SES,
      tooltip = "Solo en modo 24 h. Lo que ocurra antes, cierre forzoso u horizonte, cierra la posición.")
 i_noticias    = input.string("", "Bloqueo por noticias (HHMM ET, separadas por comas)", group = G_SES,
