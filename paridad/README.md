@@ -37,10 +37,13 @@ El panel puede prefijar la hora del navegador en cada línea; el comparador lo t
 
 ```
 Z,fecha,id,marco,dir,top,bot,mid,estado          alta de zona
-S,fecha,id,marco,dir,top,bot,mid,estado          zona ya viva al abrir el rango
+S,tNace,id,marco,dir,top,bot,mid,estado,tApertura   zona viva al abrir el rango
 E,fecha,id,est_ant,est_nuevo,dir_ant,dir_nuevo   cambio de estado o inversión
+P,fecha,id                                       zona retirada por purga FIFO
 D,fecha,id,disparador,dir,entrada,stop,stop_pts,objetivo   disparo de entrada
 ```
+
+En `S` la **primera** fecha es la de nacimiento de la zona, que es la clave por la que el comparador empareja; la última es la hora de apertura del rango. Usar la apertura como fecha de la zona haría que estas zonas nunca cuadraran con las que Python creó en su nacimiento real.
 
 Fechas en `America/New_York`. `dir` es 1 para zona de compra y −1 para zona de venta. Los estados son 0 virgen, 1 mitigada parcial, 2 consumida.
 
@@ -59,22 +62,38 @@ El comparador empareja zonas por fecha de nacimiento, marco y dirección, con to
 
 En cada cambio de estado compara el estado anterior y el nuevo, la dirección anterior y la nueva, y la **hora** del cambio: sin margen en el marco del gráfico, porque ahí el cambio tiene que caer en la misma vela, y con una vela de 5m de margen en marcos superiores, porque el momento en que cada implementación ve la vela superior cerrada puede diferir en un paso.
 
-Sale con código 0 solo si se cumplen los dos criterios de §1.2:
+Sale con código 0 solo si se cumple todo esto:
 
-- al menos el **95 %** de zonas emparejadas
-- **ninguna** discrepancia de estado sin explicar
+- al menos el **95 %** de zonas emparejadas (criterio de §1.2)
+- **ninguna** discrepancia de estado sin explicar (criterio de §1.2)
+- ninguna zona que llegara al rango en estados distintos
+- ninguna cola FIFO desalineada
 
 Si no se cumplen, no se sigue. No se baja el umbral.
 
-## Paso 3 · Qué falta por escribir
+## Paso 3 · Especificación de `detectar.py`
 
-El detector en Python (`paridad/detectar.py`) **todavía no existe**. Leerá `paridad/velas_YYYYMMDD.csv` —las velas exportadas de TradingView, no el espejo de GitHub— y tiene que reimplementar exactamente lo que hace el `.pine`:
+El detector en Python **todavía no existe**. Leerá `paridad/velas_YYYYMMDD.csv` —las velas exportadas de TradingView, no el espejo de GitHub— y debe reproducir exactamente lo que hace el `.pine`. Lo que sigue no es una lista de deseos: cada punto corresponde a una forma concreta en que las dos implementaciones podrían divergir sin que la divergencia signifique nada.
 
-- FVG de tres velas, anchura mínima 0,5×ATR(14)
-- CE al 50 %
-- máquina de estados: virgen, mitigada parcial, consumida, invertida
-- margen de invalidación 0,25×ATR
-- zonas de 1H y 4H solo después de cerrar su vela
+### a) Calentamiento antes del rango
+
+Leer velas desde **al menos tres semanas antes** del día de prueba, y emitir registros **solo dentro del rango**, con un `S` por cada zona viva al abrirlo.
+
+El motivo: una zona de 4H puede nacer días antes del día que se compara y seguir viva. Si Python empieza a leer el mismo día del rango, esa zona no existe en su estado y aparecería como "solo en Pine", hundiendo el porcentaje de emparejadas por una razón que no tiene nada que ver con la lógica de detección. Tres semanas cubren con holgura la vida útil de una zona de 4H más el calentamiento del ATR(14).
+
+### b) Un único `E` por vela
+
+Por cada vela y cada zona, como mucho **un** registro `E`, comparando el estado y la dirección **al inicio** de la vela contra los del final.
+
+Pine funciona así por construcción: la máquina de estados captura estado y dirección al entrar en la iteración de esa zona y escribe un solo registro si algo cambió al salir. Una vela puede mover una zona de virgen a mitigada y de mitigada a consumida en el mismo paso, y Pine emite **un** registro `0 -> 2`, no dos. Un detector que emitiera los pasos intermedios produciría secuencias más largas y el comparador lo marcaría como discrepancia.
+
+### c) Purga FIFO idéntica
+
+Cola de **60 zonas** (el valor por defecto de `Máximo de zonas en memoria`), descartando siempre la más antigua, y emitiendo un registro `P` al hacerlo.
+
+Si las colas no coinciden, un lado sigue informando de zonas que el otro ya olvidó. El comparador detecta ese caso y lo reporta aparte, pero conviene que no ocurra: con la misma cola no hay nada que explicar.
+
+### Cuándo escribirlo
 
 Se escribe cuando haya al menos un par de ficheros —velas y logs del mismo día— contra el que contrastarlo. Escribirlo antes es trabajar a ciegas: cualquier diferencia de interpretación saldría solo al comparar, y sin los ficheros de referencia no se puede comparar.
 
