@@ -251,8 +251,12 @@ const string G_LOG = "Exportación"
 i_logZonas  = input.bool(false, "Exportar zonas a Pine Logs", group = G_LOG,
      tooltip = "Escribe una línea CSV por evento en el panel de Pine Logs: Z al crear una zona, E al cambiar de estado y D al disparar la " +
                "entrada. Sirve para la prueba de paridad contra la detección en Python, que es lo que desbloquea la calibración.\n\n" +
-               "NINGUNA lógica de trading depende de este input: solo escribe. Cargar en OANDA:XAUUSD 5m, que es el feed contra el que se " +
-               "contrastaron los datos de Python; en MGC1! las zonas no coincidirían por el feed y la base futuros-spot.")
+               "NINGUNA lógica de trading depende de este input: solo escribe. Cargar en OANDA:XAUUSD 5m y exportar también las velas de " +
+               "esos mismos días, porque la paridad se compara contra las MISMAS velas que vio Pine.")
+i_logDesde  = input.time(timestamp("2026-09-01T00:00:00"), "Log desde", group = G_LOG,
+     tooltip = "El panel de Pine Logs tiene un límite de líneas: sin acotar el rango, los días que interesan se pierden entre miles de " +
+               "registros anteriores. Acotarlo deja el panel con solo los días de la prueba.")
+i_logHasta  = input.time(timestamp("2026-09-30T23:59:00"), "Log hasta", group = G_LOG)
 
 // --- Medición (v2 §5) --------------------------------------------------------
 const string G_MED = "Medición"
@@ -748,6 +752,10 @@ f_liqPrevia(int dir) =>
 // asignar a una variable global, pero sí mutar un array.
 var array<int> zonaSeq = array.new_int(1, 0)
 
+// Ventana de exportación. Fuera de ella no se escribe nada.
+bool enRangoLog = i_logZonas and time >= i_logDesde and time <= i_logHasta
+bool abreRangoLog = enRangoLog and not enRangoLog[1]
+
 f_addZone(float top, float bot, int dir, string tfName, int prio, float tfAtr) =>
     array.set(zonaSeq, 0, array.get(zonaSeq, 0) + 1)
     int zid = array.get(zonaSeq, 0)
@@ -768,7 +776,7 @@ f_addZone(float top, float bot, int dir, string tfName, int prio, float tfAtr) =
              text_halign  = text.align_right,
              text_valign  = text.align_center)
     // Registro Z: alta de zona. Solo escribe, no decide nada.
-    if i_logZonas
+    if enRangoLog
         log.info("Z,{0},{1},{2},{3},{4},{5},{6},{7}",
              str.format_time(time, "yyyy-MM-dd HH:mm", "America/New_York"),
              zid, tfName, dir, str.tostring(top, format.mintick),
@@ -925,7 +933,7 @@ if barstate.isconfirmed and array.size(zones) > 0
                     z.ceBar    := -1
 
         // Registro E: cambio de estado o inversión de signo. Solo escribe.
-        if i_logZonas and (z.state != estPrev or z.dir != dirPrev)
+        if enRangoLog and (z.state != estPrev or z.dir != dirPrev)
             log.info("E,{0},{1},{2},{3},{4},{5}",
                  str.format_time(time, "yyyy-MM-dd HH:mm", "America/New_York"),
                  z.id, estPrev, z.state, dirPrev, z.dir)
@@ -941,6 +949,20 @@ if barstate.isconfirmed and array.size(zones) > 0
                 box.set_text(z.bx, f_zoneLabel(z.dir, z.tf, z.inverted, z.state))
                 box.set_text_color(z.bx, color.new(z.dir == 1 ? color.green : color.red, z.state >= 2 ? 55 : 0))
         array.set(zones, i, z)
+
+// --- Registro S · inventario al entrar en la ventana de exportación ---------
+//  Sin esto, las zonas nacidas ANTES del rango no aparecen en los logs y el
+//  comparador las contaría como "solo en Python", falseando el porcentaje de
+//  emparejadas. Mismo formato que Z, con el estado y la dirección ACTUALES, que
+//  pueden no ser los de su nacimiento si ya se mitigó o se invirtió.
+if abreRangoLog and array.size(zones) > 0
+    for i = 0 to array.size(zones) - 1
+        Zona zs = array.get(zones, i)
+        log.info("S,{0},{1},{2},{3},{4},{5},{6},{7}",
+             str.format_time(time, "yyyy-MM-dd HH:mm", "America/New_York"),
+             zs.id, zs.tf, zs.dir, str.tostring(zs.top, format.mintick),
+             str.tostring(zs.bot, format.mintick), str.tostring(zs.mid, format.mintick),
+             zs.state)
 
 // =============================================================================
 //  5b · ZONAS VISIBLES · modo solo alta probabilidad (v2.1 §3)
@@ -1699,7 +1721,7 @@ if setDir != 0 and confBar and not na(atr)
                     label.delete(array.shift(lblSenales))
 
             // Registro D: disparo de entrada. Solo escribe.
-            if i_logZonas
+            if enRangoLog
                 log.info("D,{0},{1},{2},{3},{4},{5},{6},{7}",
                      str.format_time(time, "yyyy-MM-dd HH:mm", "America/New_York"),
                      isFvg ? pick.id : 0, trigId, setDir,
