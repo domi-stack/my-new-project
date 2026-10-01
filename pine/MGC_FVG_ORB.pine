@@ -555,6 +555,8 @@ type Zona
     // --- dibujo
     box    bx
     bool   visible    // la caja se oculta mutándola, nunca se borra en vida
+    int    rendTier   // tier ya renderizado, para no restilar sin cambio
+    int    rendEst    // estado ya renderizado
 
 var array<Zona> zones = array.new<Zona>()
 
@@ -612,7 +614,8 @@ f_addZone(float top, float bot, int dir, string tfName, int prio, float tfAtr) =
     Zona z = Zona.new(top = top, bot = bot, mid = (top + bot) / 2.0, dir = dir, tf = tfName,
                     prio = prio, tfAtr = tfAtr, state = 0, inverted = false, fired = false,
                     ceBar = -1, bornBar = bar_index, liqPrevia = f_liqPrevia(dir),
-                    score = 0, tier = 0, scoreTxt = "", bx = na, visible = true)
+                    score = 0, tier = 0, scoreTxt = "", bx = na, visible = true,
+                    rendTier = -1, rendEst = -1)
     if i_showBoxes
         z.bx := box.new(bar_index, top, bar_index, bot,
              border_color = f_zoneBorder(dir, 0),
@@ -750,16 +753,135 @@ f_ocultarZona(Zona z) =>
         box.set_border_color(z.bx, color.new(color.gray, 100))
         box.set_text(z.bx, "")
 
-// Devuelve una zona a su aspecto normal por estado, tras haber estado oculta.
+// =============================================================================
+//  FUERZA DE ZONA · score 0-100 (v2 §2)
+// =============================================================================
+//  PESOS A PRIORI, NO VALIDADOS.
+//  Los siete pesos de abajo son un juicio razonado, no un resultado medido.
+//  Ver fase 5: si el tier FUERTE no supera en esperanza al DÉBIL con al menos
+//  40 operaciones por tier, el score es DECORATIVO y no debe usarse como
+//  filtro. Por eso `Fuerza mínima para operar` viene a 0 y es el único punto
+//  del script donde la puntuación puede influir en una decisión de trading.
+//
+//  El score es dinámico: la alineación con el 4H y la cercanía a un nivel
+//  cambian con el precio, así que se recalcula en cada vela confirmada.
+
+f_scoreZona(Zona z) =>
+    int    s   = 0
+    string txt = ""
+
+    // 1 · Marco
+    int pMarco = z.prio == 3 ? 25 : z.prio == 2 ? 15 : 5
+    s   += pMarco
+    txt += "Marco " + z.tf + " " + str.tostring(pMarco)
+
+    // 2 · Estado
+    int pEstado = z.inverted ? 10 : z.state == 0 ? 15 : 5
+    s   += pEstado
+    txt += " · " + (z.inverted ? "invertida" : z.state == 0 ? "virgen" : "mitigada") +
+         " " + str.tostring(pEstado)
+
+    // 3 · Desplazamiento, medido contra el ATR de SU PROPIO marco
+    float ancho = z.top - z.bot
+    float rel   = na(z.tfAtr) or z.tfAtr <= 0 ? 0.0 : ancho / z.tfAtr
+    int pDespl  = rel >= 1.0 ? 15 : rel >= 0.7 ? 10 : 5
+    s   += pDespl
+    txt += " · despl " + str.tostring(rel, "#.##") + "xATR " + str.tostring(pDespl)
+
+    // 4 · Liquidez previa
+    if z.liqPrevia
+        s   += 15
+        txt += " · barrido previo 15"
+
+    // 5 · Alineación con el sesgo del marco mayor
+    int pAlin = bias4h == z.dir ? 15 : bias4h == 0 ? 7 : 0
+    s   += pAlin
+    txt += " · 4H " + (bias4h == z.dir ? "a favor" : bias4h == 0 ? "rango" : "en contra") +
+         " " + str.tostring(pAlin)
+
+    // 6 · Confluencia de nivel: como mucho una vez, aunque coincidan varias
+    float tol = na(atr) ? 0.0 : 0.3 * atr
+    float paso = str.tonumber(i_pasoRedondo)
+    bool conf = false
+    string confQue = ""
+    if tol > 0
+        if not na(pdh) and math.abs(z.mid - pdh) <= tol
+            conf := true
+            confQue := "PDH"
+        else if not na(pdl) and math.abs(z.mid - pdl) <= tol
+            conf := true
+            confQue := "PDL"
+        else if not na(asiaHiFijo) and math.abs(z.mid - asiaHiFijo) <= tol
+            conf := true
+            confQue := "Asia H"
+        else if not na(asiaLoFijo) and math.abs(z.mid - asiaLoFijo) <= tol
+            conf := true
+            confQue := "Asia L"
+        else if not na(vwap) and math.abs(z.mid - vwap) <= tol
+            conf := true
+            confQue := "VWAP"
+        else if not na(paso) and paso > 0 and math.abs(z.mid - math.round(z.mid / paso) * paso) <= tol
+            conf := true
+            confQue := "redondo"
+        else
+            // Otra zona de marco superior en la misma dirección
+            if array.size(zones) > 0
+                for i = 0 to array.size(zones) - 1
+                    Zona w = array.get(zones, i)
+                    if w.prio >= 2 and w.prio != z.prio and w.dir == z.dir and w.state <= 1
+                        if math.abs(w.mid - z.mid) <= tol
+                            conf := true
+                            confQue := "zona " + w.tf
+    if conf
+        s   += 10
+        txt += " · conf. " + confQue + " 10"
+
+    // 7 · Timing: la vela actual está dentro de la ventana Silver Bullet
+    if enSB
+        s   += 5
+        txt += " · Silver Bullet 5"
+
+    txt += " · total " + str.tostring(s)
+    [s, txt]
+
+f_tierDe(int score) =>
+    score >= 70 ? 2 : score >= 45 ? 1 : 0
+
+f_tierTxt(int tier) =>
+    tier == 2 ? "FUERTE" : tier == 1 ? "MEDIA" : "débil"
+
+// --- Tonalidad por score (v2 §2.2) ------------------------------------------
+//  El color no es binario: se interpola del neutro al color de dirección según
+//  el score, y la transparencia y el borde los pone el tier. Una zona de 4H
+//  virgen, alineada y con barrido previo sale intensa; una de 5m mitigada y
+//  contra tendencia sale casi gris.
+f_colorScore(Zona z) =>
+    color base = z.dir == 1 ? color.green : color.red
+    color c    = color.from_gradient(z.score, 30, 90, color.new(color.gray, 0), base)
+    color.new(c, z.tier == 2 ? 55 : z.tier == 1 ? 75 : 90)
+
+f_bordeScore(Zona z) =>
+    color base = z.dir == 1 ? color.green : color.red
+    color.new(base, z.tier == 2 ? 0 : z.tier == 1 ? 25 : 55)
+
+f_anchoScore(Zona z) => f_zoneWidth(z.prio) + (z.tier == 2 ? 1 : 0)
+f_estiloScore(Zona z) => z.tier == 0 ? line.style_dashed : line.style_solid
+
+// Texto de zona con el formato de §1.4, ahora que el score existe.
+f_zoneLabelScore(Zona z) =>
+    z.tf + " " + (z.dir == 1 ? "▲" : "▼") + " " + str.tostring(z.score) + " " + f_tierTxt(z.tier) +
+         (z.inverted ? " inv" : "")
+
+// Devuelve una zona a su aspecto normal, con la tonalidad del score.
 f_restaurarZona(Zona z) =>
     if not na(z.bx)
-        box.set_bgcolor(z.bx, f_zoneColor(z.dir, z.state))
-        box.set_border_color(z.bx, f_zoneBorder(z.dir, z.state))
-        box.set_border_width(z.bx, f_zoneWidth(z.prio))
-        box.set_border_style(z.bx, z.state >= 2 ? line.style_dashed : line.style_solid)
+        box.set_bgcolor(z.bx, f_colorScore(z))
+        box.set_border_color(z.bx, f_bordeScore(z))
+        box.set_border_width(z.bx, f_anchoScore(z))
+        box.set_border_style(z.bx, f_estiloScore(z))
         if i_zoneText
-            box.set_text(z.bx, z.state >= 2 ? "" : f_zoneLabel(z.dir, z.tf, z.inverted, z.state))
-            box.set_text_color(z.bx, color.new(z.dir == 1 ? color.green : color.red, 0))
+            box.set_text(z.bx, z.state >= 2 ? "" : f_zoneLabelScore(z))
+            box.set_text_color(z.bx, chart.fg_color)
             box.set_text_size(z.bx, size.small)
 
 f_destacarZona(Zona z) =>
@@ -769,8 +891,12 @@ f_destacarZona(Zona z) =>
         box.set_border_color(z.bx, color.new(col, 0))
         box.set_border_width(z.bx, 2)
         box.set_border_style(z.bx, line.style_solid)
+        // §3.1.2 pide aquí la P y la E[R] de validación. No existen: en su
+        // lugar van el score y el tier, que sí existen, y la marca de que esto
+        // no está calibrado. No se muestra ningún porcentaje.
         box.set_text(z.bx, (z.dir == 1 ? "COMPRA" : "VENTA") + " · " + z.tf +
-             (z.inverted ? " · inv" : "") + " · " + CAL_TXT)
+             (z.inverted ? " · inv" : "") + " · " + str.tostring(z.score) + " " +
+             f_tierTxt(z.tier) + " · " + CAL_TXT)
         box.set_text_color(z.bx, color.new(col, 0))
         box.set_text_size(z.bx, size.normal)
 
@@ -782,9 +908,30 @@ if barstate.isfirst
         array.push(ceLines, line.new(bar_index, close, bar_index, close,
              color = color.new(color.gray, 100), width = 1, style = line.style_solid))
 
+// Pool de etiquetas invisibles que solo sirven para llevar el tooltip con el
+// desglose del score: las cajas de Pine no admiten tooltip, solo las labels.
+var array<label> tipScore = array.new<label>()
+if barstate.isfirst
+    for k = 0 to 7
+        array.push(tipScore, label.new(bar_index, close, "", style = label.style_label_left,
+             color = color.new(color.gray, 100), textcolor = color.new(color.gray, 100),
+             size = size.small))
+
 // Índice de la zona destacada más cercana por lado, para la tabla reducida.
 var int altaArriba = -1
 var int altaAbajo  = -1
+
+// --- Recálculo del score en cada vela confirmada ----------------------------
+//  Se sincroniza el dibujo solo si cambió el estado o el tier, no por cada
+//  punto de score, para no mutar objetos sin necesidad (§2.2).
+if barstate.isconfirmed and array.size(zones) > 0
+    for i = 0 to array.size(zones) - 1
+        Zona z = array.get(zones, i)
+        [sc, stxt] = f_scoreZona(z)
+        z.score    := sc
+        z.tier     := f_tierDe(sc)
+        z.scoreTxt := stxt
+        array.set(zones, i, z)
 
 if i_soloAlta and barstate.isconfirmed and array.size(zones) > 0
     altaArriba := -1
@@ -798,8 +945,10 @@ if i_soloAlta and barstate.isconfirmed and array.size(zones) > 0
     int slot = 0
     for lado = -1 to 1 by 2
         for k = 1 to i_altaPorLado
+            // Se ordena por score y, a igualdad, por cercanía. §3.1 pide la de
+            // mayor P, que no existe sin calibración; el score es el único
+            // orden disponible y §0.2 lo permite para dibujar.
             int   bestI = -1
-            int   bestP = -1
             int   bestS = -1
             float bestD = 1e12
             for i = 0 to array.size(zones) - 1
@@ -808,15 +957,11 @@ if i_soloAlta and barstate.isconfirmed and array.size(zones) > 0
                 bool operable = z.state <= 1 and not z.fired
                 bool enLado   = lado == 1 ? z.mid > close : z.mid < close
                 if libre and operable and enLado
-                    float d   = math.abs(z.mid - close)
-                    int   est = z.state == 0 ? 1 : 0        // virgen por delante
-                    bool mejor = z.prio > bestP or
-                         (z.prio == bestP and est > bestS) or
-                         (z.prio == bestP and est == bestS and d < bestD)
+                    float d = math.abs(z.mid - close)
+                    bool mejor = z.score > bestS or (z.score == bestS and d < bestD)
                     if mejor
                         bestI := i
-                        bestP := z.prio
-                        bestS := est
+                        bestS := z.score
                         bestD := d
             if bestI >= 0
                 array.push(elegidas, bestI)
@@ -834,8 +979,14 @@ if i_soloAlta and barstate.isconfirmed and array.size(zones) > 0
                     line.set_xy2(ln, bar_index + 3,  zb.mid)
                     line.set_color(ln, color.new(zb.dir == 1 ? color.green : color.red, 20))
                     slot += 1
+                // Desglose del score en el tooltip, también en modo limpio.
+                if slot - 1 < array.size(tipScore) and slot >= 1
+                    label lt = array.get(tipScore, slot - 1)
+                    label.set_xy(lt, bar_index + 1, zb.mid)
+                    label.set_tooltip(lt, zb.scoreTxt)
 
 else if barstate.isconfirmed and array.size(zones) > 0
+    int tipSlot = 0
     // --- Modo normal (v2 §1.1 a §1.3) ---------------------------------------
     //  Tres reglas: fuera del radio de ATR no se dibuja, las consumidas se
     //  ocultan salvo que se pidan, y el número de zonas de 5m por lado se
@@ -864,10 +1015,30 @@ else if barstate.isconfirmed and array.size(zones) > 0
                             masCerca += 1
             mostrar := masCerca < i_maxVisLado
 
+        // Restilar solo si cambió el tier o el estado (§2.2); mostrar u ocultar
+        // se aplica siempre, porque depende de la distancia y cambia cada vela.
         if mostrar
-            f_restaurarZona(z)
+            if z.rendTier != z.tier or z.rendEst != z.state or not z.visible
+                f_restaurarZona(z)
+                z.rendTier := z.tier
+                z.rendEst  := z.state
+            z.visible := true
+            // El desglose del score viaja en el tooltip de una label invisible.
+            if tipSlot < array.size(tipScore)
+                label lt = array.get(tipScore, tipSlot)
+                label.set_xy(lt, bar_index + 1, z.mid)
+                label.set_tooltip(lt, z.scoreTxt)
+                tipSlot += 1
         else
-            f_ocultarZona(z)
+            if z.visible
+                f_ocultarZona(z)
+                z.visible := false
+        array.set(zones, i, z)
+
+    // Las labels de tooltip no usadas se llevan fuera de la vista.
+    if tipSlot < array.size(tipScore)
+        for k = tipSlot to array.size(tipScore) - 1
+            label.set_tooltip(array.get(tipScore, k), "")
 
 // =============================================================================
 //  6 · SELECCIÓN DE LA ZONA QUE DISPARA
