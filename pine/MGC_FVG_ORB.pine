@@ -205,6 +205,13 @@ i_soloAltaOper = input.bool(false, "Operar solo zonas ALTA", group = G_LIM,
                "cumpliera el criterio y vetaría TODAS las entradas, que es peor que no filtrar. Su bit y sus contadores ya están en la " +
                "máscara de vetos, listos para cuando exista la tabla.")
 
+// --- Medición (v2 §5) --------------------------------------------------------
+const string G_MED = "Medición"
+i_verResultados = input.bool(true, "Mostrar tabla de resultados", group = G_MED)
+i_fechaDiag = input.time(timestamp("2000-01-01T00:00:00"), "Fecha de inicio del diagnóstico", group = G_MED,
+     tooltip = "Las dos tablas cuentan solo desde esta fecha, para poder separar la muestra de desarrollo de la de validación. " +
+               "Por defecto cuenta todo.")
+
 // --- Ejecución en vivo (v2 §3.3 y §3.4) -------------------------------------
 const string G_EJE = "Ejecución en vivo"
 i_atmStop   = input.float(15.0, "Stop de la ATM en vivo (pts)", minval = 0.1, group = G_EJE,
@@ -325,6 +332,21 @@ bool forceOut   = modo24 ? (nowMinNY >= 16 * 60 + 50) : (nowMin >= closeHr * 60)
 bool forceViernes = modo24 and esViernes and nowMinNY >= 16 * 60 + 50
 
 float atr = ta.atr(i_atrLen)
+
+// ATR medio de 5m por sesión, en cola de 20 sesiones (§5.3).
+var array<float> atrSes = array.new_float()
+var float atrSum = 0.0
+var int   atrN   = 0
+// Media de ATR por sesión, en cola de 20, para §5.3.
+if windowStart and atrN > 0
+    array.push(atrSes, atrSum / atrN)
+    while array.size(atrSes) > 20
+        array.shift(atrSes)
+    atrSum := 0.0
+    atrN   := 0
+if not na(atr)
+    atrSum += atr
+    atrN   += 1
 
 // =============================================================================
 //  3 · ESTRUCTURA DE MERCADO
@@ -583,6 +605,8 @@ type Operacion
     float  riesgoUSD    // riesgo planificado, en USD
     float  stopPts      // anchura del stop, en puntos
     int    entryBar
+    int    entryTime    // para respetar la fecha de inicio del diagnóstico
+    bool   forzado      // cerrada por cierre forzoso u horizonte
 
 var array<Operacion> ops = array.new<Operacion>()
 
@@ -1292,9 +1316,12 @@ var float  pendTarget = na
 var string openId     = ""   // id del disparador de la posición abierta
 var int    openTime   = na   // marca de entrada, para el horizonte máximo
 
-// Todos los stops estructurales calculados, operados o no. Es el dato que dice
-// si el techo de puntos es el cuello de botella (fase 5).
-var array<float> stopsVistos = array.new_float()
+// Todos los stops estructurales calculados, operados o no, con el disparador al
+// que pertenecen. Es el dato que dice si el techo de puntos es el cuello de
+// botella (§5.3).
+var array<float>  stopsVistos = array.new_float()
+var array<string> stopsTrig   = array.new_string()
+
 
 f_reason(bool isLong, string head) =>
     string s = head
@@ -1346,6 +1373,7 @@ if setDir != 0 and confBar and not na(atr)
 
     if not na(riskPts) and riskPts > 0
         array.push(stopsVistos, riskPts)
+        array.push(stopsTrig, isFvg ? (pick.tf == "4H" ? "FVG4H" : pick.tf == "1H" ? "FVG1H" : "FVG5") : "SWP")
 
     // --- Tamaño: nunca menos de 1 contrato, nunca más riesgo del fijado -----
     int qty = 1
@@ -1424,7 +1452,7 @@ if setDir != 0 and confBar and not na(atr)
             // no se recalcula después, para que R sea PnL / riesgo real.
             array.push(ops, Operacion.new(disparador = trigId, tier = trigTier,
                  riesgoUSD = qty * riskPts * f_pointValue, stopPts = riskPts,
-                 entryBar = bar_index))
+                 entryBar = bar_index, entryTime = time, forzado = false))
 
             // Etiqueta en el gráfico: COMPRA en verde debajo, VENTA en rojo
             // encima. El detalle completo va en el tooltip para no ensuciar.
@@ -1457,6 +1485,12 @@ bool porHorizonte = modo24 and strategy.position_size != 0 and not na(openTime) 
      (time - openTime) >= i_horizonte * 3600000
 
 if strategy.position_size != 0 and (forceOut or porHorizonte)
+    // Se marca la operación abierta antes de cerrarla: es la última de `ops`,
+    // porque solo hay una posición a la vez.
+    if array.size(ops) > 0
+        Operacion oAct = array.get(ops, array.size(ops) - 1)
+        oAct.forzado := true
+        array.set(ops, array.size(ops) - 1, oAct)
     strategy.close_all(comment = porHorizonte ? "horizonte" :
          forceViernes ? "cierre viernes" : "cierre forzoso")
     openTime := na
@@ -1729,7 +1763,7 @@ if barstate.islast
 f_biasTxt(int b) => b ==  1 ? "alcista" : b == -1 ? "bajista" : "rango"
 f_biasCol(int b) => b ==  1 ? color.new(color.teal, 0) : b == -1 ? color.new(color.maroon, 0) : color.new(color.gray, 0)
 
-var table diag = table.new(position.top_right, 2, 13, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50))
+var table diag = table.new(position.top_right, 2, 15, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50))
 
 // =============================================================================
 //  10b · TABLA REDUCIDA · modo solo alta probabilidad (v2.1 §3.1.5)
@@ -1782,6 +1816,99 @@ if i_soloAlta and barstate.islast
          text_size = size.small, text_color = color.new(color.orange, 0),
          bgcolor = esSpot ? color.new(color.orange, 70) : color.new(color.gray, 100))
 
+
+// =============================================================================
+//  10c · TABLA DE RESULTADOS por disparador y por tier (v2 §5.1)
+// =============================================================================
+//  Se recorre strategy.closedtrades una sola vez y se acumula por grupo. R de
+//  cada operación = PnL / riesgo PLANIFICADO guardado al entrar, nunca
+//  recalculado. Solo cuentan las operaciones cuya entrada es posterior a la
+//  fecha de inicio del diagnóstico (§5.2).
+
+f_pctl(array<float> a, float p) =>
+    float r = na
+    if array.size(a) > 0
+        array<float> c = array.copy(a)
+        array.sort(c, order.ascending)
+        int idx = math.min(array.size(c) - 1, math.max(0, int(math.floor(p * (array.size(c) - 1)))))
+        r := array.get(c, idx)
+    r
+
+var table res = table.new(position.bottom_right, 7, 12, border_width = 1,
+     frame_width = 1, frame_color = color.new(color.gray, 40))
+
+if i_verResultados and verExtras and barstate.islast
+    // 6 disparadores + 3 tiers + total = 10 grupos
+    array<string> gNom = array.from("FVG5", "FVG1H", "FVG4H", "SWP", "SB", "ASIA",
+         "FUERTE", "MEDIA", "débil", "TOTAL")
+    array<int>   gN   = array.new_int(10, 0)
+    array<int>   gWin = array.new_int(10, 0)
+    array<float> gR   = array.new_float(10, 0.0)
+    array<float> gPos = array.new_float(10, 0.0)
+    array<float> gNeg = array.new_float(10, 0.0)
+    array<int>   gFz  = array.new_int(10, 0)
+    array<float> gDD  = array.new_float(10, 0.0)
+    array<float> gEq  = array.new_float(10, 0.0)
+    array<float> gPk  = array.new_float(10, 0.0)
+
+    for ti = 0 to strategy.closedtrades - 1
+        if ti < array.size(ops)
+            Operacion o = array.get(ops, ti)
+            if o.entryTime >= i_fechaDiag and o.riesgoUSD > 0
+                float pnl = strategy.closedtrades.profit(ti)
+                float rr  = pnl / o.riesgoUSD
+                // índice del disparador y del tier
+                int di = o.disparador == "FVG5" ? 0 : o.disparador == "FVG1H" ? 1 :
+                     o.disparador == "FVG4H" ? 2 : o.disparador == "SWP" ? 3 :
+                     o.disparador == "SB" ? 4 : 5
+                int tiIdx = o.tier == 2 ? 6 : o.tier == 1 ? 7 : 8
+                for gi in array.from(di, tiIdx, 9)
+                    array.set(gN,  gi, array.get(gN, gi) + 1)
+                    array.set(gR,  gi, array.get(gR, gi) + rr)
+                    if rr > 0
+                        array.set(gWin, gi, array.get(gWin, gi) + 1)
+                        array.set(gPos, gi, array.get(gPos, gi) + rr)
+                    else
+                        array.set(gNeg, gi, array.get(gNeg, gi) - rr)
+                    if o.forzado
+                        array.set(gFz, gi, array.get(gFz, gi) + 1)
+                    // drawdown en R sobre la curva del grupo
+                    float eq = array.get(gEq, gi) + rr
+                    array.set(gEq, gi, eq)
+                    float pk = math.max(array.get(gPk, gi), eq)
+                    array.set(gPk, gi, pk)
+                    array.set(gDD, gi, math.max(array.get(gDD, gi), pk - eq))
+
+    table.cell(res, 0, 0, "Grupo",  text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
+    table.cell(res, 1, 0, "n",      text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
+    table.cell(res, 2, 0, "win %",  text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
+    table.cell(res, 3, 0, "E[R]",   text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
+    table.cell(res, 4, 0, "PF",     text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
+    table.cell(res, 5, 0, "DD R",   text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
+    table.cell(res, 6, 0, "% forz", text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
+
+    for gi = 0 to 9
+        int n = array.get(gN, gi)
+        int row = gi + 1
+        // Una fila con n < 40 no basta para concluir: se marca en gris.
+        color fg = n >= 40 ? chart.fg_color : color.new(color.gray, 35)
+        table.cell(res, 0, row, array.get(gNom, gi), text_size = size.small, text_color = fg)
+        table.cell(res, 1, row, str.tostring(n), text_size = size.small, text_color = fg)
+        if n > 0
+            float er = array.get(gR, gi) / n
+            float pf = array.get(gNeg, gi) > 0 ? array.get(gPos, gi) / array.get(gNeg, gi) : na
+            table.cell(res, 2, row, str.tostring(100.0 * array.get(gWin, gi) / n, "#") + "%", text_size = size.small, text_color = fg)
+            table.cell(res, 3, row, str.tostring(er, "+#.##"), text_size = size.small,
+                 text_color = n >= 40 ? (er >= 0.15 ? color.new(color.green, 0) : er <= 0 ? color.new(color.red, 0) : fg) : fg)
+            table.cell(res, 4, row, na(pf) ? "—" : str.tostring(pf, "#.##"), text_size = size.small, text_color = fg)
+            table.cell(res, 5, row, str.tostring(array.get(gDD, gi), "#.##"), text_size = size.small, text_color = fg)
+            table.cell(res, 6, row, str.tostring(100.0 * array.get(gFz, gi) / n, "#") + "%", text_size = size.small, text_color = fg)
+        else
+            for cc = 2 to 6
+                table.cell(res, cc, row, "—", text_size = size.small, text_color = fg)
+
+    table.cell(res, 0, 11, "n<40 en gris: muestra insuficiente para concluir",
+         text_size = size.tiny, text_color = color.new(color.gray, 25))
 
 if i_showTable and verExtras and barstate.islast
     float upLvl = na
@@ -1857,3 +1984,29 @@ if i_showTable and verExtras and barstate.islast
 
     table.cell(diag, 0, 12, "Veto (bloquea)", text_size = size.small)
     table.cell(diag, 1, 12, vBloq == "" ? "ninguno" : vBloq, text_size = size.small)
+
+    // §5.3 · El dato que decide si el techo de puntos es el cuello de botella:
+    // mediana y percentil 80 del stop estructural de TODOS los setups vistos,
+    // por disparador, frente al ATR medio de las últimas 20 sesiones.
+    string stTxt = ""
+    array<string> trigs = array.from("FVG5", "FVG1H", "FVG4H", "SWP")
+    for k = 0 to array.size(trigs) - 1
+        string tg = array.get(trigs, k)
+        array<float> sub = array.new_float()
+        if array.size(stopsVistos) > 0
+            for j = 0 to array.size(stopsVistos) - 1
+                if array.get(stopsTrig, j) == tg
+                    array.push(sub, array.get(stopsVistos, j))
+        if array.size(sub) > 0
+            stTxt += (stTxt == "" ? "" : "  ") + tg + " " +
+                 str.tostring(f_pctl(sub, 0.5), "#.#") + "/" +
+                 str.tostring(f_pctl(sub, 0.8), "#.#")
+
+    float atrMedio = array.size(atrSes) > 0 ? array.avg(atrSes) : na
+
+    table.cell(diag, 0, 13, "Stop med/p80", text_size = size.small)
+    table.cell(diag, 1, 13, stTxt == "" ? "—" : stTxt + "  pts", text_size = size.small)
+
+    table.cell(diag, 0, 14, "ATR 20 sesiones", text_size = size.small)
+    table.cell(diag, 1, 14, na(atrMedio) ? "—" : str.tostring(atrMedio, "#.##") + " pts · techo " +
+         str.tostring(i_maxStopPts, "#") + " pts", text_size = size.small)
