@@ -837,9 +837,19 @@ if i_useSB and barstate.isconfirmed and sbMssDir != 0 and not na(sbMssBar) and
 //  Devuelve también el ATR del propio marco, en la misma tupla, para que la
 //  fase 2 pueda medir el desplazamiento sin añadir llamadas nuevas.
 f_htfFvg(int atrLen, float minMult) =>
-    float a    = ta.atr(atrLen)
+    //  El ATR va DESPLAZADO como todo lo demás. Sin el [1], con lookahead_on
+    //  devolvía el ATR de la vela superior en formación, y como entra en el
+    //  test de anchura mínima, el propio criterio de existencia del FVG
+    //  repintaba: el hueco podía aparecer o desaparecer según cómo cerrara esa
+    //  vela.
+    float a    = ta.atr(atrLen)[1]
     bool  bull = low[1]  > high[3] and (low[1] - high[3]) >= minMult * a
     bool  bear = high[1] < low[3]  and (low[3] - high[1]) >= minMult * a
+    //  `time` es la ÚNICA expresión que va sin desplazar, y a propósito: es la
+    //  hora de apertura de la vela superior en curso, que se conoce al abrirla
+    //  y no filtra nada del futuro. Sirve para detectar el cambio de vela
+    //  superior, que es el momento en que el FVG de las velas ya cerradas pasa
+    //  a existir.
     [time, bull, low[1], high[3], bear, low[3], high[1], a]
 
 [t1, bull1, bull1Top, bull1Bot, bear1, bear1Top, bear1Bot, atr1h] =
