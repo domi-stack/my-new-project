@@ -131,10 +131,12 @@ i_minClearR = input.float(2.0, "Holgura mínima al nivel del marco mayor (R)", m
                "Con 2.0 el nivel actúa como filtro de holgura y el objetivo sigue siendo el de la cuenta; por debajo de 2.0 el nivel pasa a " +
                "ser el objetivo real y el ratio riesgo/beneficio empeora.")
 i_obstacles = input.string("Solo zonas del marco mayor", "Qué obstruye el recorrido (modo B)",
-     options = ["Solo zonas del marco mayor", "+ máx/mín del día anterior", "+ extremos de sesión"], group = G_MTF,
+     options = ["Solo zonas del marco mayor", "+ máx/mín del día anterior", "+ extremos de sesión", "+ números redondos"], group = G_MTF,
      tooltip = "Qué niveles cuentan como pared al medir la holgura. Incluir los extremos de la sesión hace que el filtro vete casi todo: " +
                "el máximo de la sesión está normalmente a pocos puntos del precio, y romperlo es justo lo que pasa en un día de tendencia. " +
-               "Por eso solo las zonas del marco mayor cuentan por defecto.")
+               "Por eso solo las zonas del marco mayor cuentan por defecto.\n\n" +
+               "AVISO sobre '+ números redondos': con paso de 25 USD vetará casi todo, por la misma razón que pasaba con los extremos de " +
+               "sesión. Siempre hay un número redondo cerca.")
 
 // --- Filtros -----------------------------------------------------------------
 const string G_FLT = "Filtros"
@@ -204,6 +206,32 @@ i_soloAltaOper = input.bool(false, "Operar solo zonas ALTA", group = G_LIM,
      tooltip = "Desactivado a la fuerza mientras no haya calibración. Si se activara sin tabla calibrada no habría ninguna zona que " +
                "cumpliera el criterio y vetaría TODAS las entradas, que es peor que no filtrar. Su bit y sus contadores ya están en la " +
                "máscara de vetos, listos para cuando exista la tabla.")
+
+// --- Disparadores nuevos (v2 §4) · todos desactivados por defecto -----------
+const string G_DIS = "Disparadores nuevos"
+//  HIPÓTESIS, NO VENTAJAS DEMOSTRADAS. Vienen de patrones recurrentes en las
+//  herramientas públicas para oro intradía; ninguna fuente aporta resultados
+//  auditados. Se implementan para poder MEDIRLOS de uno en uno con la tabla de
+//  la fase 5, no porque se sepa que funcionan. No se reintroduce el ORB: el
+//  backtest propio sobre 177K velas dio esperanza negativa.
+i_useSB     = input.bool(false, "Operar Silver Bullet", group = G_DIS,
+     tooltip = "Secuencia completa: barrido de liquidez, luego CHoCH de 5m en contra del barrido, luego el FVG de la vela de desplazamiento, " +
+               "y entrada al volver a su 50% dentro de la ventana. El stop va al FVG o al swing del MSS, NO a la mecha del barrido: ese es " +
+               "el motivo de existir de este disparador, porque la mecha pasa de 15 pts con frecuencia y se veta.")
+i_sbMaxVelas = input.int(6, "Velas máximas barrido → MSS", minval = 1, maxval = 30, group = G_DIS)
+i_useAsia   = input.bool(false, "Operar falso rompimiento asiático", group = G_DIS,
+     tooltip = "Vela que supera el máximo o el mínimo del rango asiático y cierra de vuelta dentro. Amplía el conjunto de niveles del " +
+               "barrido con dos nuevos, con su propio id para medirlo aparte.")
+i_asiaStop  = input.string("mecha", "Stop del barrido ASIA", options = ["mecha", "cuerpo + colchón"], group = G_DIS)
+
+// --- Filtros nuevos (v2 §4.3 y §4.4) ----------------------------------------
+i_vetoAdr   = input.bool(false, "Veto por ADR agotado", group = G_FLT,
+     tooltip = "Si el rango ya recorrido hoy supera este porcentaje del ADR(20), no se entra: la idea es que el movimiento del día ya está " +
+               "hecho. Entra en la máscara de vetos con su bit y sus contadores.")
+i_pctAdr    = input.float(100.0, "% de ADR para el veto", minval = 10, maxval = 300, step = 5, group = G_FLT)
+i_verDxy    = input.bool(false, "Fila de contexto DXY", group = G_FLT,
+     tooltip = "Solo lectura: dirección del dólar en 1H respecto a su EMA 20. NO entra en ninguna decisión. Si la medición muestra que los " +
+               "largos con DXY bajista baten claramente a los largos con DXY alcista, entonces se valorará como filtro.")
 
 // --- Medición (v2 §5) --------------------------------------------------------
 const string G_MED = "Medición"
@@ -434,6 +462,23 @@ else if inSession
 // Máximo y mínimo del día anterior: se pide la vela diaria ya cerrada.
 [pdh, pdl] = request.security(syminfo.tickerid, "1D", [high[1], low[1]], lookahead = barmerge.lookahead_off)
 
+// --- ADR(20) y rango consumido hoy (§4.3) -----------------------------------
+//  El ADR se toma de velas diarias YA CERRADAS ([1]); el rango de hoy es el de
+//  la vela diaria en formación, que es precisamente lo que se quiere medir.
+float adr20    = request.security(syminfo.tickerid, "1D", ta.sma(high - low, 20)[1], lookahead = barmerge.lookahead_off)
+float rangoHoy = request.security(syminfo.tickerid, "1D", high - low, lookahead = barmerge.lookahead_off)
+float pctAdrHoy = na(adr20) or adr20 <= 0 or na(rangoHoy) ? na : rangoHoy / adr20 * 100.0
+bool  adrAgotado = not na(pctAdrHoy) and pctAdrHoy >= i_pctAdr
+
+// --- Contexto DXY, solo lectura (§4.5) --------------------------------------
+//  No entra en ninguna decisión. Está para que la medición diga si merece la
+//  pena convertirlo en filtro.
+f_dxyDir() =>
+    float c = close
+    float e = ta.ema(close, 20)
+    c > e ? 1 : c < e ? -1 : 0
+int dxyDir = i_verDxy ? nz(request.security("TVC:DXY", "60", f_dxyDir()[1], lookahead = barmerge.lookahead_off)) : 0
+
 // --- Barridos de liquidez ----------------------------------------------------
 //  Mecha que supera un extremo previo y cierra de vuelta dentro. Barrer mínimos
 //  es alcista (han cazado stops de vendidos); barrer máximos, bajista.
@@ -455,14 +500,27 @@ bool swpSwHi = confBar and not na(swHigh) and high > swHigh and close < swHigh
 bool refSess  = i_sweepRefs != "Solo día anterior"
 bool refSwing = i_sweepRefs == "Todo (día, sesión, swing)"
 
-bool sweepBull = swpPdl or (refSess and swpSesLo) or (refSwing and swpSwLo)
-bool sweepBear = swpPdh or (refSess and swpSesHi) or (refSwing and swpSwHi)
+// Último rango asiático ya cerrado. Se declara aquí, antes de los barridos que
+// lo consultan, y se rellena en la sección 4b cuando la sesión asiática cierra.
+// Lo usan el disparador ASIA y la confluencia del score.
+var float asiaHiFijo = na
+var float asiaLoFijo = na
+
+// §4.2 · Rango asiático como dos niveles más del mismo mecanismo de barrido.
+bool swpAsiaLo = confBar and i_useAsia and not na(asiaLoFijo) and low  < asiaLoFijo and close > asiaLoFijo
+bool swpAsiaHi = confBar and i_useAsia and not na(asiaHiFijo) and high > asiaHiFijo and close < asiaHiFijo
+
+bool sweepBull = swpPdl or (refSess and swpSesLo) or (refSwing and swpSwLo) or swpAsiaLo
+bool sweepBear = swpPdh or (refSess and swpSesHi) or (refSwing and swpSwHi) or swpAsiaHi
 
 // Qué nivel concreto se barrió, para el motivo de la señal.
-string swpNameBull = swpPdl ? "mínimo del día anterior" : (refSess and swpSesLo) ? "mínimo de la sesión" :
-     (refSwing and swpSwLo) ? "mínimo de swing" : ""
-string swpNameBear = swpPdh ? "máximo del día anterior" : (refSess and swpSesHi) ? "máximo de la sesión" :
-     (refSwing and swpSwHi) ? "máximo de swing" : ""
+string swpNameBull = swpAsiaLo ? "mínimo del rango asiático" : swpPdl ? "mínimo del día anterior" :
+     (refSess and swpSesLo) ? "mínimo de la sesión" : (refSwing and swpSwLo) ? "mínimo de swing" : ""
+string swpNameBear = swpAsiaHi ? "máximo del rango asiático" : swpPdh ? "máximo del día anterior" :
+     (refSess and swpSesHi) ? "máximo de la sesión" : (refSwing and swpSwHi) ? "máximo de swing" : ""
+
+// El barrido del rango asiático tiene id propio para poder medirlo aparte.
+bool esSweepAsia = swpAsiaLo or swpAsiaHi
 
 bool sweepBullRecent = nz(ta.barssince(sweepBull), 999999) <= i_sweepLook
 bool sweepBearRecent = nz(ta.barssince(sweepBear), 999999) <= i_sweepLook
@@ -520,11 +578,6 @@ else if enLon
     lonHi := math.max(nz(lonHi, high), high)
     lonLo := math.min(nz(lonLo, low),  low)
 
-// Último rango asiático ya cerrado. Lo necesitan el disparador ASIA y la
-// confluencia del score, así que se conserva aparte del dibujo.
-var float asiaHiFijo = na
-var float asiaLoFijo = na
-
 var array<box>  boxAsia = array.new<box>()
 var array<line> midAsia = array.new<line>()
 var array<box>  boxLon  = array.new<box>()
@@ -580,6 +633,8 @@ type Zona
     int    ceBar      // vela que dispara la entrada según el modo elegido
     int    bornBar    // vela de creación: en ella no se evalúa mitigación
     bool   liqPrevia  // nació poco después de un barrido del lado contrario
+    bool   esSB       // la creó la vela de desplazamiento de un MSS (§4.1)
+    float  sbSwing    // swing que originó ese MSS, para el stop del SB
     // --- fuerza (fase 2)
     int    score
     int    tier       // 0 débil · 1 media · 2 fuerte
@@ -648,6 +703,7 @@ f_addZone(float top, float bot, int dir, string tfName, int prio, float tfAtr) =
     Zona z = Zona.new(top = top, bot = bot, mid = (top + bot) / 2.0, dir = dir, tf = tfName,
                     prio = prio, tfAtr = tfAtr, state = 0, inverted = false, fired = false,
                     ceBar = -1, bornBar = bar_index, liqPrevia = f_liqPrevia(dir),
+                    esSB = false, sbSwing = na,
                     score = 0, tier = 0, scoreTxt = "", bx = na, visible = true,
                     rendTier = -1, rendEst = -1)
     if i_showBoxes
@@ -676,6 +732,46 @@ if barstate.isconfirmed and not na(atr)
         f_addZone(low, high[2], 1, "5m", 1, atr)
     if high < low[2] and (low[2] - high) >= minW
         f_addZone(low[2], high, -1, "5m", 1, atr)
+
+// --- Secuencia Silver Bullet (§4.1) -----------------------------------------
+//  Barrido de liquidez -> CHoCH de 5m EN CONTRA del barrido dentro de n velas
+//  -> el FVG que crea la vela de desplazamiento de ese MSS. La entrada la
+//  dispara luego la misma máquina de siempre al volver al 50% de ese FVG.
+//  No se duplica nada: se reutilizan los barridos, el CHoCH y el detector FVG.
+var int   sbSweepDir = 0
+var int   sbSweepBar = na
+var int   sbMssDir   = 0
+var int   sbMssBar   = na
+var float sbMssSwing = na
+var int   sbDiaHecho = -1   // día CME en que ya se operó un SB
+
+if i_useSB and barstate.isconfirmed
+    // 1 · barrido de cualquier extremo de liquidez
+    if sweepBull or sweepBear
+        sbSweepDir := sweepBull ? 1 : -1
+        sbSweepBar := bar_index
+        sbMssDir   := 0
+    // 2 · CHoCH en contra del barrido, dentro de la ventana de velas.
+    //     Barrer mínimos (dir 1) espera un CHoCH alcista.
+    if sbSweepDir != 0 and not na(sbSweepBar) and (bar_index - sbSweepBar) <= i_sbMaxVelas
+        if sbSweepDir == 1 and chochUp
+            sbMssDir   := 1
+            sbMssBar   := bar_index
+            sbMssSwing := swLow
+        else if sbSweepDir == -1 and chochDn
+            sbMssDir   := -1
+            sbMssBar   := bar_index
+            sbMssSwing := swHigh
+
+// 3 · Si el FVG de 5m recién creado es el de la vela de desplazamiento del MSS
+//     (la misma vela o la siguiente) y va en su dirección, se marca como SB.
+if i_useSB and barstate.isconfirmed and sbMssDir != 0 and not na(sbMssBar) and
+     (bar_index - sbMssBar) <= 1 and array.size(zones) > 0
+    Zona zl = array.get(zones, array.size(zones) - 1)
+    if zl.tf == "5m" and zl.bornBar == bar_index and zl.dir == sbMssDir and not zl.esSB
+        zl.esSB    := true
+        zl.sbSwing := sbMssSwing
+        array.set(zones, array.size(zones) - 1, zl)
 
 // --- Detección en marcos superiores -----------------------------------------
 //  Se evalúa con desplazamiento [1]/[3] para que el patrón de 3 velas esté
@@ -1134,6 +1230,7 @@ f_htfOppositeLevel(bool isLong, float from) =>
 f_sessionObstacle(bool isLong, float from) =>
     bool  usePrevDay = i_obstacles != "Solo zonas del marco mayor"
     bool  useSession = i_obstacles == "+ extremos de sesión"
+    bool  useRedondo = i_obstacles == "+ números redondos"
     float lvl = na
     if isLong
         if usePrevDay and not na(pdh) and pdh > from
@@ -1145,6 +1242,13 @@ f_sessionObstacle(bool isLong, float from) =>
             lvl := pdl
         if useSession and not na(sessLow) and sessLow < from
             lvl := na(lvl) ? sessLow : math.max(lvl, sessLow)
+    // §4.4 · el siguiente número redondo por delante del precio
+    if useRedondo
+        float paso = str.tonumber(i_pasoRedondo)
+        if not na(paso) and paso > 0
+            float sig = isLong ? math.ceil(from / paso) * paso : math.floor(from / paso) * paso
+            if sig != from
+                lvl := na(lvl) ? sig : (isLong ? math.min(lvl, sig) : math.max(lvl, sig))
     lvl
 
 // =============================================================================
@@ -1284,8 +1388,9 @@ f_mascara(int dir, float entrada, float stop, bool esFvg, int zScore) =>
     if i_minScore > 0 and zScore < i_minScore
         m += V_FUERZA
 
-    // V_ADR se rellena en la fase 4. Reservado aquí para no volver a tocar la
-    // máscara después.
+    // §4.3 · ADR agotado: el movimiento del día ya está hecho.
+    if i_vetoAdr and adrAgotado
+        m += V_ADR
 
     // Solo zonas ALTA: solo puede vetar si existe tabla calibrada. Sin ella el
     // input está forzado a off y este bit nunca se activa, porque vetaría todo.
@@ -1343,7 +1448,7 @@ string setKind = ""
 if not na(pick)
     setDir  := pick.dir
     setKind := "FVG"
-else if i_useSweep and confBar
+else if (i_useSweep or i_useAsia) and confBar
     if sweepBull
         setDir  := 1
         setKind := "Barrido"
@@ -1360,12 +1465,31 @@ if setDir != 0 and confBar and not na(atr)
     //  El FVG usa la regla compartida f_stopDeZona; el barrido pone el stop en
     //  su propia mecha, que es lo que invalida la lectura si el precio vuelve
     //  más allá de ella.
+    //  Un SB solo cuenta como SB dentro de su ventana y una vez al día; fuera
+    //  de eso la zona sigue siendo un FVG de 5m normal y se opera como tal, en
+    //  lugar de perderse.
+    bool esSBok = isFvg and pick.esSB and i_useSB and enSB and sbDiaHecho != dayKey
+    bool esAsia = (not isFvg) and esSweepAsia
+
     float stop = na
-    if isFvg
+    float buf  = i_stopBuf * atr
+    if esSBok
+        // El más cercano al precio de los dos que siguen invalidando la idea:
+        // el borde lejano del FVG o el swing que originó el MSS. NO la mecha
+        // del barrido, que es precisamente lo que este disparador evita.
+        float farFvg = isLong ? pick.bot : pick.top
+        float refSb  = na(pick.sbSwing) ? farFvg :
+             (isLong ? math.max(farFvg, pick.sbSwing) : math.min(farFvg, pick.sbSwing))
+        float sr = isLong ? refSb - buf : refSb + buf
+        stop := isLong ? math.floor(sr / f_tickPoints) * f_tickPoints
+                       : math.ceil( sr / f_tickPoints) * f_tickPoints
+    else if isFvg
         stop := f_stopDeZona(pick)
     else
-        float buf = i_stopBuf * atr
-        float sr  = isLong ? low - buf : high + buf
+        float refMe = isLong ? low : high
+        if esAsia and i_asiaStop == "cuerpo + colchón"
+            refMe := isLong ? math.min(open, close) : math.max(open, close)
+        float sr = isLong ? refMe - buf : refMe + buf
         stop := isLong ? math.floor(sr / f_tickPoints) * f_tickPoints
                        : math.ceil( sr / f_tickPoints) * f_tickPoints
 
@@ -1373,7 +1497,9 @@ if setDir != 0 and confBar and not na(atr)
 
     if not na(riskPts) and riskPts > 0
         array.push(stopsVistos, riskPts)
-        array.push(stopsTrig, isFvg ? (pick.tf == "4H" ? "FVG4H" : pick.tf == "1H" ? "FVG1H" : "FVG5") : "SWP")
+        array.push(stopsTrig, esSBok ? "SB" :
+             isFvg ? (pick.tf == "4H" ? "FVG4H" : pick.tf == "1H" ? "FVG1H" : "FVG5") :
+             esAsia ? "ASIA" : "SWP")
 
     // --- Tamaño: nunca menos de 1 contrato, nunca más riesgo del fijado -----
     int qty = 1
@@ -1409,8 +1535,12 @@ if setDir != 0 and confBar and not na(atr)
 
         // Un id por disparador, para que el Strategy Tester separe resultados.
         string trigId = ""
-        if isFvg
+        if esSBok
+            trigId := "SB"
+        else if isFvg
             trigId := pick.tf == "4H" ? "FVG4H" : pick.tf == "1H" ? "FVG1H" : "FVG5"
+        else if esAsia
+            trigId := "ASIA"
         else
             trigId := "SWP"
         int trigTier = isFvg ? pick.tier : 0
@@ -1428,6 +1558,18 @@ if setDir != 0 and confBar and not na(atr)
                      (pick.inverted ? " invertido" : "") + " al 50%"
             else
                 head := "Barrido de " + (isLong ? swpNameBull : swpNameBear)
+            if esSBok
+                head := "Silver Bullet · " + head
+            // §4.2 · Se registra si el lado opuesto del rango asiático queda
+            // antes o después del 2R. Es un dato para valorar más adelante un
+            // objetivo alternativo; NO cambia el objetivo ahora.
+            if esAsia and not na(asiaHiFijo) and not na(asiaLoFijo)
+                float opuesto = isLong ? asiaHiFijo : asiaLoFijo
+                float dOp = math.abs(opuesto - entry)
+                float d2R = math.abs(target - entry)
+                head += ", lado opuesto del rango asiático " +
+                     (dOp < d2R ? "ANTES" : "DESPUÉS") + " del 2R (" +
+                     str.tostring(dOp, "#.#") + " vs " + str.tostring(d2R, "#.#") + " pts)"
 
             string msg = (isLong ? "COMPRA" : "VENTA") + " MGC" +
                  " | entrada "  + str.tostring(entry,  format.mintick) +
@@ -1472,6 +1614,9 @@ if setDir != 0 and confBar and not na(atr)
             // barrido `pick` es na.
             if isFvg
                 pick.fired := true
+            // Un único SB por ventana y día (§4.1).
+            if esSBok
+                sbDiaHecho := dayKey
             tradesToday += 1
 
 // Refresco de la protección mientras haya posición abierta. Se dirige al id del
@@ -1763,7 +1908,7 @@ if barstate.islast
 f_biasTxt(int b) => b ==  1 ? "alcista" : b == -1 ? "bajista" : "rango"
 f_biasCol(int b) => b ==  1 ? color.new(color.teal, 0) : b == -1 ? color.new(color.maroon, 0) : color.new(color.gray, 0)
 
-var table diag = table.new(position.top_right, 2, 15, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50))
+var table diag = table.new(position.top_right, 2, 17, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50))
 
 // =============================================================================
 //  10b · TABLA REDUCIDA · modo solo alta probabilidad (v2.1 §3.1.5)
@@ -1989,7 +2134,7 @@ if i_showTable and verExtras and barstate.islast
     // mediana y percentil 80 del stop estructural de TODOS los setups vistos,
     // por disparador, frente al ATR medio de las últimas 20 sesiones.
     string stTxt = ""
-    array<string> trigs = array.from("FVG5", "FVG1H", "FVG4H", "SWP")
+    array<string> trigs = array.from("FVG5", "FVG1H", "FVG4H", "SWP", "SB", "ASIA")
     for k = 0 to array.size(trigs) - 1
         string tg = array.get(trigs, k)
         array<float> sub = array.new_float()
@@ -2010,3 +2155,15 @@ if i_showTable and verExtras and barstate.islast
     table.cell(diag, 0, 14, "ATR 20 sesiones", text_size = size.small)
     table.cell(diag, 1, 14, na(atrMedio) ? "—" : str.tostring(atrMedio, "#.##") + " pts · techo " +
          str.tostring(i_maxStopPts, "#") + " pts", text_size = size.small)
+
+    // §4.3 y §4.5 · contexto que no decide nada: ADR consumido y dirección DXY.
+    table.cell(diag, 0, 15, "ADR hoy", text_size = size.small)
+    table.cell(diag, 1, 15, na(pctAdrHoy) ? "—" : str.tostring(pctAdrHoy, "#") + "% del ADR(20)" +
+         (i_vetoAdr ? " · veto a " + str.tostring(i_pctAdr, "#") + "%" : " · veto apagado"),
+         text_size = size.small)
+
+    table.cell(diag, 0, 16, "DXY 1H", text_size = size.small)
+    table.cell(diag, 1, 16, not i_verDxy ? "—" :
+         dxyDir == 1 ? "alcista (sobre EMA20)" : dxyDir == -1 ? "bajista (bajo EMA20)" : "plano",
+         text_size = size.small,
+         text_color = dxyDir == 0 ? chart.fg_color : color.new(color.gray, 20))
