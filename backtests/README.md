@@ -27,9 +27,16 @@ Esto requiere TradingView y hay que hacerlo a mano: el entorno donde se escribi�
 
 Todo lo demás, en su valor por defecto.
 
-3. En el Strategy Tester, pestaña **List of Trades**, exportar a CSV.
-4. Guardar como `backtests/baseline-v2.2.csv` y subirlo al repo.
-5. Anotar abajo la fecha, el rango de datos y el número de operaciones.
+3. **Decidir qué hacer con el cambio de contrato.** `MGC1!` es un continuo: al vencer un contrato, la serie salta al siguiente y ese salto de precio no es un movimiento del mercado. Sin tratarlo, un hueco de roll puede crear un FVG que no existió, disparar un stop que nadie tocó o contaminar el ADR. Hay dos formas válidas y hay que usar una:
+
+   - **Ajuste por cambio de contrato activado**: en los ajustes del símbolo del gráfico, activar *Adjust for contract changes* (o *Continuous contract*, según la versión). La serie queda empalmada y los huecos de roll desaparecen.
+   - **Sin ajuste, excluyendo las sesiones de roll**: listar las fechas de vencimiento del periodo y descartar del CSV las operaciones de esas sesiones. El oro en CME tiene contratos activos en febrero, abril, junio, agosto, octubre y diciembre, y el roll práctico ocurre a finales del mes anterior al vencimiento.
+
+   Anotar abajo cuál se usó. Mezclar las dos entre pasadas invalida la comparación.
+
+4. En el Strategy Tester, pestaña **List of Trades**, exportar a CSV.
+5. Guardar como `backtests/baseline-v2.2.csv` y subirlo al repo.
+6. Anotar abajo la fecha, el rango de datos y el número de operaciones.
 
 ## Cómo se usa
 
@@ -49,7 +56,11 @@ Rango de datos      :
 Nº de operaciones   :
 Commit              : (git rev-parse --short HEAD)
 Etiqueta            : baseline-v2.2
+Tratamiento del roll: [ ] ajuste por cambio de contrato activado
+                      [ ] sin ajuste, sesiones de roll excluidas (listar fechas)
 ```
+
+> El tag `baseline-v2.2` existe en local pero **no está en el remoto**: el proxy de git del entorno corta la conexión al enviar tags, probado con tag anotado y ligero. El commit de referencia es `65a2869`. Para etiquetarlo: `git tag baseline-v2.2 65a2869 && git push origin baseline-v2.2`.
 
 ## Qué más entregar en la misma pasada
 
