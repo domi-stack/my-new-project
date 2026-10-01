@@ -205,6 +205,16 @@ i_soloAltaOper = input.bool(false, "Operar solo zonas ALTA", group = G_LIM,
                "cumpliera el criterio y vetaría TODAS las entradas, que es peor que no filtrar. Su bit y sus contadores ya están en la " +
                "máscara de vetos, listos para cuando exista la tabla.")
 
+// --- Ejecución en vivo (v2 §3.3 y §3.4) -------------------------------------
+const string G_EJE = "Ejecución en vivo"
+i_atmStop   = input.float(15.0, "Stop de la ATM en vivo (pts)", minval = 0.1, group = G_EJE,
+     tooltip = "La ATM de NinjaTrader pone un stop fijo. La estrategia usa stops estructurales y escala contratos, así que si ejecutas la " +
+               "señal con esa ATM la operación real NO es la del backtest. Cuando difieran más de 0,5 pts el texto de acción lo avisa y " +
+               "muestra el riesgo en los dos casos.")
+i_baseFut   = input.float(0.0, "Base futuros − spot (pts)", step = 0.1, group = G_EJE,
+     tooltip = "Si el gráfico es de oro spot (XAUUSD) en vez de MGC/GC, los precios difieren en esta base. Con un valor distinto de 0 el " +
+               "texto de acción muestra también los niveles convertidos a futuros.")
+
 // --- Visual ------------------------------------------------------------------
 const string G_VIS = "Visual"
 i_showBoxes = input.bool(true, "Dibujar zonas",                 group = G_VIS)
@@ -1461,6 +1471,141 @@ if strategy.closedtrades > nz(strategy.closedtrades[1], 0)
             rHoy += strategy.closedtrades.profit(ci) / riesgoPlan
 
 // =============================================================================
+//  8b · CAPA DE ACCIÓN · qué hacer ahora (v2 §3)
+// =============================================================================
+//  Un único estado por vela, con la prioridad de §3.1: el primero que aplique
+//  gana. La "máscara teórica" no es una copia de los filtros: es la MISMA
+//  función f_mascara evaluada como si la entrada fuera en el CE de la zona.
+
+// Plan completo de una zona, con las mismas reglas que usa la ejecución.
+f_planZona(Zona z) =>
+    bool  isLong  = z.dir == 1
+    float entrada = z.mid
+    float stop    = f_stopDeZona(z)
+    float riskPts = na(stop) ? na : (isLong ? entrada - stop : stop - entrada)
+    int   qty     = 1
+    if i_scaleUp and not na(riskPts) and riskPts > 0
+        qty := math.max(1, int(math.floor(i_riskUSD / (riskPts * f_pointValue))))
+    float tgtPts = i_targetUSD / (qty * f_pointValue)
+    float target = isLong ? entrada + tgtPts : entrada - tgtPts
+    if modeB
+        float lvl = f_nivelObstruccion(isLong, entrada)
+        if not na(lvl)
+            target := isLong ? math.min(target, lvl - invM) : math.max(target, lvl + invM)
+    [entrada, stop, target, qty, riskPts]
+
+// Minutos hasta el cierre forzoso.
+int minsCierre = math.max(0, (modo24 ? (16 * 60 + 50) - nowMinNY : closeHr * 60 - nowMin))
+
+// Candidata: la zona de mejor score con tier >= MEDIA dentro del radio.
+int   candI = -1
+int   candS = -1
+float candD = 1e12
+if array.size(zones) > 0
+    for i = 0 to array.size(zones) - 1
+        Zona z = array.get(zones, i)
+        float dATR = na(atr) ? 1e12 : math.abs(z.mid - close) / atr
+        if z.state <= 1 and not z.fired and z.tier >= 1 and dATR <= i_distMaxATR
+            float d = math.abs(z.mid - close)
+            if z.score > candS or (z.score == candS and d < candD)
+                candI := i
+                candS := z.score
+                candD := d
+
+string accTxt = "NO OPERAR"
+string accSub = ""
+color  accCol = color.new(color.gray, 25)
+
+bool hayCand = candI >= 0 and candI < array.size(zones)
+float candATR = na
+int   candMask = 0
+if hayCand
+    Zona zc = array.get(zones, candI)
+    candATR := na(atr) ? na : math.abs(zc.mid - close) / atr
+    candMask := f_mascara(zc.dir, zc.mid, f_stopDeZona(zc), true, zc.score)
+
+if strategy.position_size != 0
+    // --- GESTIONAR: R actual, distancia a SL y TP en R, minutos al cierre
+    float ep = strategy.position_avg_price
+    int   sg = strategy.position_size > 0 ? 1 : -1
+    float rp = na(pendStop) ? na : math.abs(ep - pendStop)
+    float rAct = na(rp) or rp <= 0 ? na : (close - ep) * sg / rp
+    float rSl  = na(rp) or rp <= 0 ? na : math.abs(close - pendStop) / rp
+    float rTp  = na(rp) or rp <= 0 or na(pendTarget) ? na : math.abs(pendTarget - close) / rp
+    accTxt := "GESTIONAR " + (sg > 0 ? "LARGO" : "CORTO") + " · " + str.tostring(rAct, "+#.##") + "R"
+    accSub := "SL a " + str.tostring(rSl, "#.##") + "R · TP a " + str.tostring(rTp, "#.##") + "R · " +
+         str.tostring(minsCierre) + " min al cierre forzoso"
+    accCol := color.new(color.blue, 15)
+else if setDir != 0
+    accTxt := "EJECUTAR " + (setDir == 1 ? "COMPRA" : "VENTA")
+    accSub := "disparo en esta vela"
+    accCol := setDir == 1 ? color.new(color.green, 0) : color.new(color.red, 0)
+else if not hayCand
+    accTxt := "NO OPERAR · sin zona MEDIA o FUERTE en el radio"
+    accCol := color.new(color.gray, 25)
+else if f_vetoTiene(candMask, V_DIARIO)
+    accTxt := "NO OPERAR · límite diario alcanzado"
+    accCol := color.new(color.gray, 25)
+else if f_vetoTiene(candMask, V_VENTANA)
+    accTxt := "NO OPERAR · fuera de ventana"
+    accCol := color.new(color.gray, 25)
+else
+    Zona zc = array.get(zones, candI)
+    [pEnt, pStop, pTgt, pQty, pRisk] = f_planZona(zc)
+    string dirTxt = zc.dir == 1 ? "COMPRA" : "VENTA"
+    string zTx = zc.tf + " " + (zc.dir == 1 ? "▲" : "▼") + " " + str.tostring(zc.score) + " " + f_tierTxt(zc.tier)
+
+    if candATR <= 2 and candMask == 0
+        accTxt := "PREPARAR " + dirTxt + " · " + zTx
+        accCol := zc.dir == 1 ? color.new(color.green, 30) : color.new(color.red, 30)
+        accSub := "Limit en " + str.tostring(pEnt, format.mintick) +
+             " · SL " + str.tostring(pStop, format.mintick) +
+             " (" + str.tostring(pRisk, "#.#") + " pts)" +
+             " · TP " + str.tostring(pTgt, format.mintick) +
+             " · " + str.tostring(pQty) + "c · " + str.tostring(math.round(pQty * pRisk * f_pointValue)) + " $"
+    else if candATR <= 2
+        accTxt := "ESPERAR CONFIRMACIÓN · " + zTx
+        accCol := color.new(color.orange, 20)
+        // Se nombran los vetos activos, no un genérico.
+        string vs = ""
+        for idx = 0 to N_VETOS - 1
+            if f_vetoTiene(candMask, f_vetoBit(idx))
+                vs += (vs == "" ? "" : " + ") + f_vetoName(idx)
+        accSub := "Veto: " + (vs == "" ? "—" : vs) +
+             (bias4h != 0 and bias4h != zc.dir ? " · contra 4H" : "")
+    else
+        accTxt := "VIGILAR " + dirTxt + " · " + zTx
+        accCol := zc.dir == 1 ? color.new(color.green, 60) : color.new(color.red, 60)
+        accSub := "a " + str.tostring(candATR, "#.#") + " ATR del precio"
+
+    // --- §3.3 Coherencia con la ATM en vivo ---------------------------------
+    if not na(pRisk) and math.abs(pRisk - i_atmStop) > 0.5
+        float riesgoAtm = i_atmStop * f_pointValue
+        accSub += "\nATM ≠ señal: stop " + str.tostring(pRisk, "#.#") + " pts vs ATM " +
+             str.tostring(i_atmStop, "#.#") + " → ajustar stop a mano, o 1c con la ATM (" +
+             str.tostring(math.round(riesgoAtm)) + " $ de riesgo real frente a " +
+             str.tostring(math.round(pQty * pRisk * f_pointValue)) + " $ de la señal)"
+
+    // --- §3.4 Conversión spot -> futuros ------------------------------------
+    if i_baseFut != 0
+        accSub += "\nEn MGC: entrada " + str.tostring(pEnt + i_baseFut, format.mintick) +
+             " · SL " + str.tostring(pStop + i_baseFut, format.mintick) +
+             " · TP " + str.tostring(pTgt + i_baseFut, format.mintick)
+
+// Aviso de precios spot: el ticker no es de futuros de oro.
+bool esSpot = not (str.startswith(syminfo.ticker, "MGC") or str.startswith(syminfo.ticker, "GC"))
+
+// Etiqueta de acción a la derecha del precio.
+var label lbAcc = na
+if barstate.islast
+    if na(lbAcc)
+        lbAcc := label.new(bar_index + 3, close, "", style = label.style_label_left,
+             textcolor = color.white, size = size.normal)
+    label.set_xy(lbAcc, bar_index + 3, close)
+    label.set_text(lbAcc, accTxt + (accSub == "" ? "" : "\n" + accSub))
+    label.set_color(lbAcc, accCol)
+
+// =============================================================================
 //  9 · DIBUJO
 // =============================================================================
 //  En modo solo alta probabilidad se oculta todo lo que compita con las zonas
@@ -1589,11 +1734,13 @@ var table diag = table.new(position.top_right, 2, 13, border_width = 1, frame_wi
 // =============================================================================
 //  10b · TABLA REDUCIDA · modo solo alta probabilidad (v2.1 §3.1.5)
 // =============================================================================
-var table limpia = table.new(position.top_right, 2, 4, border_width = 1,
+//  Cinco filas y nada más. El estado de acción viene de la capa de §8b: no se
+//  recalcula aquí, para que la tabla y la etiqueta digan siempre lo mismo.
+var table limpia = table.new(position.top_right, 2, 5, border_width = 1,
      frame_width = 1, frame_color = color.new(color.gray, 40))
 
 if i_soloAlta and barstate.islast
-    // Zona destacada más cercana al precio, de las dos que el modo deja ver.
+    // Zona más cercana de las que el modo deja ver.
     float dArr = 1e12
     float dAba = 1e12
     if altaArriba >= 0 and altaArriba < array.size(zones)
@@ -1603,52 +1750,19 @@ if i_soloAlta and barstate.islast
     int  zi      = dArr <= dAba ? altaArriba : altaAbajo
     bool hayZona = zi >= 0 and zi < array.size(zones)
 
-    string zTxt  = "—"
-    float  zDist = na
-    int    zDir  = 0
-    int    mTeo  = 0
+    string zTxt = "—"
+    int    zDir = 0
     if hayZona
         Zona z = array.get(zones, zi)
-        zDir  := z.dir
-        zDist := na(atr) ? na : math.abs(z.mid - close) / atr
-        zTxt  := (z.dir == 1 ? "COMPRA" : "VENTA") + " · " + z.tf + " · " +
-             str.tostring(zDist, "#.##") + " ATR"
-        // Máscara TEÓRICA: los mismos filtros, evaluados como si la entrada
-        // fuera en el CE de esta zona. Reutiliza la función, no la duplica.
-        mTeo := f_mascara(z.dir, z.mid, f_stopDeZona(z), true, 100)
+        zDir := z.dir
+        zTxt := (z.dir == 1 ? "COMPRA" : "VENTA") + " · " + z.tf + " · " +
+             str.tostring(z.score) + " " + f_tierTxt(z.tier) + " · " +
+             str.tostring(na(atr) ? na : math.abs(z.mid - close) / atr, "#.##") + " ATR"
 
-    // Estado de acción, por prioridad: el primero que aplique gana.
-    string acc    = "NO OPERAR"
-    color  accCol = color.new(color.gray, 25)
-    if strategy.position_size != 0
-        acc    := "GESTIONAR " + (strategy.position_size > 0 ? "LARGO" : "CORTO") +
-             " · " + str.tostring(rHoy, "+#.##") + "R hoy"
-        accCol := color.new(color.blue, 15)
-    else if setDir != 0
-        acc    := "EJECUTAR " + (setDir == 1 ? "COMPRA" : "VENTA")
-        accCol := setDir == 1 ? color.new(color.green, 0) : color.new(color.red, 0)
-    else if not hayZona
-        acc    := "NO OPERAR · sin zona operable"
-        accCol := color.new(color.gray, 25)
-    else if f_vetoTiene(mTeo, V_DIARIO)
-        acc    := "NO OPERAR · límite diario"
-        accCol := color.new(color.gray, 25)
-    else if f_vetoTiene(mTeo, V_VENTANA)
-        acc    := "NO OPERAR · fuera de ventana"
-        accCol := color.new(color.gray, 25)
-    else if not na(zDist) and zDist <= 2 and mTeo == 0
-        acc    := "PREPARAR " + (zDir == 1 ? "COMPRA" : "VENTA")
-        accCol := zDir == 1 ? color.new(color.green, 30) : color.new(color.red, 30)
-    else if not na(zDist) and zDist <= 2
-        acc    := "ESPERAR CONFIRMACIÓN"
-        accCol := color.new(color.orange, 20)
-    else
-        acc    := "VIGILAR " + (zDir == 1 ? "COMPRA" : "VENTA")
-        accCol := zDir == 1 ? color.new(color.green, 60) : color.new(color.red, 60)
-
-    table.cell(limpia, 0, 0, acc, text_color = color.white, bgcolor = accCol,
+    table.cell(limpia, 0, 0, accTxt, text_color = color.white, bgcolor = accCol,
          text_size = size.large, text_halign = text.align_center)
-    table.cell(limpia, 1, 0, "", bgcolor = accCol)
+    table.cell(limpia, 1, 0, accSub, text_color = color.white, bgcolor = accCol,
+         text_size = size.small, text_halign = text.align_left)
 
     table.cell(limpia, 0, 1, "Zona más cercana", text_size = size.small)
     table.cell(limpia, 1, 1, zTxt, text_size = size.small,
@@ -1660,6 +1774,14 @@ if i_soloAlta and barstate.islast
 
     table.cell(limpia, 0, 3, "Calibración", text_size = size.small)
     table.cell(limpia, 1, 3, CAL_TXT, text_size = size.small, text_color = color.new(color.orange, 0))
+
+    // §3.4 · aviso de precios spot
+    table.cell(limpia, 0, 4, esSpot ? "AVISO" : "", text_size = size.small,
+         bgcolor = esSpot ? color.new(color.orange, 70) : color.new(color.gray, 100))
+    table.cell(limpia, 1, 4, esSpot ? "Precios SPOT: sumar base futuros−spot antes de ejecutar" : "",
+         text_size = size.small, text_color = color.new(color.orange, 0),
+         bgcolor = esSpot ? color.new(color.orange, 70) : color.new(color.gray, 100))
+
 
 if i_showTable and verExtras and barstate.islast
     float upLvl = na
