@@ -20,7 +20,9 @@
 //
 //  SIN REPINTADO: toda decisión se toma sobre velas cerradas
 //  (barstate.isconfirmed), los pivotes confirman con retardo por construcción y
-//  request.security usa lookahead_off sobre velas ya cerradas del marco mayor.
+//  request.security usa lookahead_on con la expresión desplazada [1], que es el
+//  idioma que NO repinta: devuelve el valor de la vela superior ya cerrada y
+//  hace coincidir histórico y tiempo real.
 //
 //  DIMENSIONAMIENTO: MGC son 10 USD/punto y no se puede bajar de 1 contrato,
 //  así que con 150 USD de riesgo el stop tiene un techo duro de 15 puntos.
@@ -389,7 +391,12 @@ if not na(atr)
 //  swings confirmados. El sesgo se clasifica como HH+HL (alcista) frente a
 //  LH+LL (bajista); cualquier otra combinación se considera rango.
 
-f_structure(int pl, int pr) =>
+//  `shift` existe para el patrón de marcos superiores: `lookahead_on` con la
+//  expresión desplazada [1] es el idioma que no repinta, porque devuelve el
+//  valor de la vela HTF ya CERRADA y lo hace coincidir en histórico y en vivo.
+//  En el marco del propio gráfico no se desplaza: ahí la vela confirmada es la
+//  actual y retrasarla una vela sería perder información.
+f_structure(int pl, int pr, bool shift) =>
     float ph = ta.pivothigh(pl, pr)
     float pv = ta.pivotlow(pl, pr)
     var float sh1 = na
@@ -408,13 +415,13 @@ f_structure(int pl, int pr) =>
             bias := 1
         else if sh1 < sh2 and sl1 < sl2
             bias := -1
-    [bias, sh1, sl1]
+    [shift ? nz(bias[1], 0) : bias, shift ? sh1[1] : sh1, shift ? sl1[1] : sl1]
 
-[bias5, swHigh, swLow] = f_structure(i_pivL, i_pivR)
+[bias5, swHigh, swLow] = f_structure(i_pivL, i_pivR, false)
 
 // Sesgo de los marcos superiores. request.security debe estar en ámbito global.
-[b1hRaw, sh1hRaw, sl1hRaw] = request.security(syminfo.tickerid, i_tf1, f_structure(i_pivHtfL, i_pivHtfR), lookahead = barmerge.lookahead_off)
-[b4hRaw, sh4hRaw, sl4hRaw] = request.security(syminfo.tickerid, i_tf2, f_structure(i_pivHtfL, i_pivHtfR), lookahead = barmerge.lookahead_off)
+[b1hRaw, sh1hRaw, sl1hRaw] = request.security(syminfo.tickerid, i_tf1, f_structure(i_pivHtfL, i_pivHtfR, true), lookahead = barmerge.lookahead_on)
+[b4hRaw, sh4hRaw, sl4hRaw] = request.security(syminfo.tickerid, i_tf2, f_structure(i_pivHtfL, i_pivHtfR, true), lookahead = barmerge.lookahead_on)
 int bias1h = nz(b1hRaw)
 int bias4h = nz(b4hRaw)
 
@@ -466,13 +473,25 @@ else if inSession
     sessLow  := math.min(nz(sessLow,  low),  low)
 
 // Máximo y mínimo del día anterior: se pide la vela diaria ya cerrada.
-[pdh, pdl] = request.security(syminfo.tickerid, "1D", [high[1], low[1]], lookahead = barmerge.lookahead_off)
+[pdh, pdl] = request.security(syminfo.tickerid, "1D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
 
 // --- ADR(20) y rango consumido hoy (§4.3) -----------------------------------
 //  El ADR se toma de velas diarias YA CERRADAS ([1]); el rango de hoy es el de
 //  la vela diaria en formación, que es precisamente lo que se quiere medir.
-float adr20    = request.security(syminfo.tickerid, "1D", ta.sma(high - low, 20)[1], lookahead = barmerge.lookahead_off)
-float rangoHoy = request.security(syminfo.tickerid, "1D", high - low, lookahead = barmerge.lookahead_off)
+float adr20 = request.security(syminfo.tickerid, "1D", ta.sma(high - low, 20)[1], lookahead = barmerge.lookahead_on)
+
+// El rango consumido hoy NO se pide al diario: pedir la vela diaria en
+// formación es justo el caso que repinta. Se acumula en el marco del gráfico
+// desde el inicio del día de trading, que en modo 24 h es el día CME.
+var float dayHi = na
+var float dayLo = na
+if nuevoDia
+    dayHi := high
+    dayLo := low
+else
+    dayHi := math.max(nz(dayHi, high), high)
+    dayLo := math.min(nz(dayLo, low),  low)
+float rangoHoy  = na(dayHi) or na(dayLo) ? na : dayHi - dayLo
 float pctAdrHoy = na(adr20) or adr20 <= 0 or na(rangoHoy) ? na : rangoHoy / adr20 * 100.0
 bool  adrAgotado = not na(pctAdrHoy) and pctAdrHoy >= i_pctAdr
 
@@ -483,7 +502,7 @@ f_dxyDir() =>
     float c = close
     float e = ta.ema(close, 20)
     c > e ? 1 : c < e ? -1 : 0
-int dxyDir = i_verDxy ? nz(request.security("TVC:DXY", "60", f_dxyDir()[1], lookahead = barmerge.lookahead_off)) : 0
+int dxyDir = i_verDxy ? nz(request.security("TVC:DXY", "60", f_dxyDir()[1], lookahead = barmerge.lookahead_on)) : 0
 
 // --- Barridos de liquidez ----------------------------------------------------
 //  Mecha que supera un extremo previo y cierra de vuelta dentro. Barrer mínimos
@@ -781,7 +800,7 @@ if i_useSB and barstate.isconfirmed and sbMssDir != 0 and not na(sbMssBar) and
 
 // --- Detección en marcos superiores -----------------------------------------
 //  Se evalúa con desplazamiento [1]/[3] para que el patrón de 3 velas esté
-//  cerrado en el propio marco superior, y con lookahead_off. Así el FVG del
+//  cerrado en el propio marco superior, y con lookahead_on. Así el FVG del
 //  marco mayor aparece cuando de verdad existe, nunca antes.
 //  Devuelve también el ATR del propio marco, en la misma tupla, para que la
 //  fase 2 pueda medir el desplazamiento sin añadir llamadas nuevas.
@@ -792,9 +811,9 @@ f_htfFvg(int atrLen, float minMult) =>
     [time, bull, low[1], high[3], bear, low[3], high[1], a]
 
 [t1, bull1, bull1Top, bull1Bot, bear1, bear1Top, bear1Bot, atr1h] =
-     request.security(syminfo.tickerid, i_tf1, f_htfFvg(i_atrLen, i_fvgMinMult), lookahead = barmerge.lookahead_off)
+     request.security(syminfo.tickerid, i_tf1, f_htfFvg(i_atrLen, i_fvgMinMult), lookahead = barmerge.lookahead_on)
 [t2, bull2, bull2Top, bull2Bot, bear2, bear2Top, bear2Bot, atr4h] =
-     request.security(syminfo.tickerid, i_tf2, f_htfFvg(i_atrLen, i_fvgMinMult), lookahead = barmerge.lookahead_off)
+     request.security(syminfo.tickerid, i_tf2, f_htfFvg(i_atrLen, i_fvgMinMult), lookahead = barmerge.lookahead_on)
 
 bool newHtf1 = not na(t1) and t1 != nz(t1[1], 0)
 bool newHtf2 = not na(t2) and t2 != nz(t2[1], 0)
