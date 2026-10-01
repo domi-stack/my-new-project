@@ -681,6 +681,7 @@ type Zona
     bool   fired      // ya generó una señal: no vuelve a disparar
     int    ceBar      // vela que dispara la entrada según el modo elegido
     int    bornBar    // vela de creación: en ella no se evalúa mitigación
+    int    tNace      // hora de la vela de 5m en que nació, para la paridad
     bool   liqPrevia  // nació poco después de un barrido del lado contrario
     bool   esSB       // la creó la vela de desplazamiento de un MSS (§4.1)
     float  sbSwing    // swing que originó ese MSS, para el stop del SB
@@ -761,7 +762,7 @@ f_addZone(float top, float bot, int dir, string tfName, int prio, float tfAtr) =
     int zid = array.get(zonaSeq, 0)
     Zona z = Zona.new(top = top, bot = bot, mid = (top + bot) / 2.0, dir = dir, tf = tfName,
                     prio = prio, tfAtr = tfAtr, id = zid, state = 0, inverted = false, fired = false,
-                    ceBar = -1, bornBar = bar_index, liqPrevia = f_liqPrevia(dir),
+                    ceBar = -1, bornBar = bar_index, tNace = time, liqPrevia = f_liqPrevia(dir),
                     esSB = false, sbSwing = na,
                     score = 0, tier = 0, scoreTxt = "", bx = na, visible = true,
                     rendTier = -1, rendEst = -1)
@@ -958,11 +959,17 @@ if barstate.isconfirmed and array.size(zones) > 0
 if abreRangoLog and array.size(zones) > 0
     for i = 0 to array.size(zones) - 1
         Zona zs = array.get(zones, i)
-        log.info("S,{0},{1},{2},{3},{4},{5},{6},{7}",
-             str.format_time(time, "yyyy-MM-dd HH:mm", "America/New_York"),
+        //  La fecha que va primero es la de NACIMIENTO de la zona, no la de
+        //  apertura del rango: es la clave por la que el comparador empareja, y
+        //  usar la apertura del rango haría que estas zonas no cuadraran con
+        //  las que Python creó antes. La apertura del rango va al final, como
+        //  dato de contexto.
+        log.info("S,{0},{1},{2},{3},{4},{5},{6},{7},{8}",
+             str.format_time(zs.tNace, "yyyy-MM-dd HH:mm", "America/New_York"),
              zs.id, zs.tf, zs.dir, str.tostring(zs.top, format.mintick),
              str.tostring(zs.bot, format.mintick), str.tostring(zs.mid, format.mintick),
-             zs.state)
+             zs.state,
+             str.format_time(time, "yyyy-MM-dd HH:mm", "America/New_York"))
 
 // =============================================================================
 //  5b · ZONAS VISIBLES · modo solo alta probabilidad (v2.1 §3)

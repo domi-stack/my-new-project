@@ -13,7 +13,9 @@ Entradas
 Formato de los registros de Pine
 --------------------------------
   Z,fecha,id,marco,dir,top,bot,mid,estado      alta de zona
-  S,fecha,id,marco,dir,top,bot,mid,estado      zona ya viva al abrir el rango
+  S,tNace,id,marco,dir,top,bot,mid,estado,tApertura
+        zona ya viva al abrir el rango. La PRIMERA fecha es la de nacimiento,
+        que es la clave de emparejamiento; la última es la apertura del rango.
   E,fecha,id,estado_ant,estado_nuevo,dir_ant,dir_nuevo   cambio de estado
   D,fecha,id,disparador,dir,entrada,stop,stop_pts,objetivo   disparo
 
@@ -57,7 +59,7 @@ UMBRAL_EMPAREJADAS = 0.95
 
 @dataclass
 class Zona:
-    fecha: datetime
+    fecha: datetime   # nacimiento, tanto en Z como en S
     zid: str
     marco: str
     direccion: int
@@ -67,12 +69,32 @@ class Zona:
     # (fecha, estado_ant, estado_nuevo, dir_ant, dir_nuevo)
     estados: list[tuple[datetime, int, int, int, int]] = field(default_factory=list)
 
+    # Solo en zonas que llegan por S: estado declarado al abrir el rango, y la
+    # hora de esa apertura. Sirve para cotejar el estado de arranque.
+    estado_s: int | None = None
+    t_apertura: datetime | None = None
+
     @property
     def es_htf(self) -> bool:
         return self.marco.upper() not in ("5M", "5")
 
     def clave(self) -> tuple:
         return (self.marco, self.direccion)
+
+
+def estado_en(z: Zona, t: datetime) -> int:
+    """Estado de una zona en el instante t, replicando sus cambios hasta ahí.
+
+    Una zona nace virgen (0); cada cambio registrado la mueve. Lo que importa es
+    el último cambio con fecha menor o igual a t.
+    """
+    est = 0
+    for fecha, _ant, nuevo, _da, _dn in sorted(z.estados):
+        if fecha <= t:
+            est = nuevo
+        else:
+            break
+    return est
 
 
 def _parse_fecha(txt: str) -> datetime:
@@ -111,8 +133,17 @@ def leer(path: Path) -> dict[str, Zona]:
                         bot=float(campos[6]),
                         mid=float(campos[7]),
                     )
+                    if tipo == "S":
+                        # Estado declarado al abrir el rango y hora de apertura.
+                        z.estado_s = int(campos[8]) if len(campos) > 8 else None
+                        if len(campos) > 9:
+                            z.t_apertura = _parse_fecha(campos[9])
                     if z.zid not in zonas:
                         zonas[z.zid] = z
+                    elif tipo == "S":
+                        # Si ya se vio por Z, S solo aporta el estado de arranque.
+                        zonas[z.zid].estado_s = z.estado_s
+                        zonas[z.zid].t_apertura = z.t_apertura
                 elif tipo == "E" and len(campos) >= 5:
                     zid = campos[2]
                     if zid in zonas:
@@ -197,8 +228,13 @@ def main() -> None:
     discrepan: list[tuple[Zona, str]] = []
     for zp, zq in pares:
         tol = TOL_CAMBIO_HTF if zp.es_htf else TOL_CAMBIO_5M
-        sp = sorted(zp.estados)
-        sq = sorted(zq.estados)
+        # Solo se cotejan los cambios DENTRO de la ventana observada. Lo que
+        # pasó antes ya lo resume el estado de arranque, y si un lado emitiera
+        # registros previos y el otro no, las secuencias no cuadrarían nunca por
+        # una razón que no tiene nada que ver con la lógica.
+        desde = zp.t_apertura
+        sp = [e for e in sorted(zp.estados) if desde is None or e[0] >= desde]
+        sq = [e for e in sorted(zq.estados) if desde is None or e[0] >= desde]
         if len(sp) != len(sq):
             discrepan.append((zp, f"nº de cambios: pine={len(sp)} python={len(sq)}"))
             continue
@@ -218,11 +254,28 @@ def main() -> None:
                     f"dirección: pine {ep[3]}->{ep[4]} vs python {eq[3]}->{eq[4]}"))
                 break
 
+    # Estado de arranque: para las zonas que Pine declaró por S, comprobar que
+    # Python estaba en el mismo estado en esa misma vela. Si no coinciden, las
+    # dos implementaciones llegaron al rango con historias distintas y comparar
+    # lo que pasa dentro del rango no significa nada.
+    arranque: list[tuple[Zona, int, int]] = []
+    for zp, zq in pares:
+        if zp.estado_s is None or zp.t_apertura is None:
+            continue
+        est_py = estado_en(zq, zp.t_apertura)
+        if est_py != zp.estado_s:
+            arranque.append((zp, zp.estado_s, est_py))
+
+    print(f"\ndiscrepancias de estado al abrir el rango: {len(arranque)}")
+    for zp, ep, eq in arranque[:15]:
+        print(f"   {zp.fecha:%Y-%m-%d %H:%M} {zp.marco:>3}: al abrir el rango "
+              f"pine={ep} python={eq}")
+
     print(f"\ndiscrepancias de estado en zonas emparejadas: {len(discrepan)}")
     for zp, motivo in discrepan[:15]:
         print(f"   {zp.fecha:%Y-%m-%d %H:%M} {zp.marco:>3}: {motivo}")
 
-    ok = pct >= UMBRAL_EMPAREJADAS and not discrepan
+    ok = pct >= UMBRAL_EMPAREJADAS and not discrepan and not arranque
     print("\n" + ("PARIDAD OK: se puede seguir con la calibración"
                   if ok else
                   "PARIDAD INSUFICIENTE: NO seguir con la calibración"))
@@ -231,6 +284,8 @@ def main() -> None:
             print(f"  emparejadas {pct:.1%}, por debajo del {UMBRAL_EMPAREJADAS:.0%} exigido")
         if discrepan:
             print(f"  {len(discrepan)} discrepancias de estado sin explicar")
+        if arranque:
+            print(f"  {len(arranque)} zonas llegaron al rango en estados distintos")
     raise SystemExit(0 if ok else 1)
 
 
