@@ -788,6 +788,12 @@ f_addZone(float top, float bot, int dir, string tfName, int prio, float tfAtr) =
         Zona old = array.shift(zones)
         if not na(old.bx)
             box.delete(old.bx)
+        // Registro P: la zona desaparece por purga, no por nada que haya hecho
+        // el precio. Sin él, el comparador vería que un lado deja de informar
+        // de esa zona y no sabría si fue purga o divergencia de lógica.
+        if enRangoLog
+            log.info("P,{0},{1}",
+                 str.format_time(time, "yyyy-MM-dd HH:mm", "America/New_York"), old.id)
 
 // --- Detección en el marco actual (5m) --------------------------------------
 //  Imbalance de 3 velas según especificación: alcista si low[0] > high[2],

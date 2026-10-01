@@ -17,6 +17,7 @@ Formato de los registros de Pine
         zona ya viva al abrir el rango. La PRIMERA fecha es la de nacimiento,
         que es la clave de emparejamiento; la última es la apertura del rango.
   E,fecha,id,estado_ant,estado_nuevo,dir_ant,dir_nuevo   cambio de estado
+  P,fecha,id                                   zona retirada por purga FIFO
   D,fecha,id,disparador,dir,entrada,stop,stop_pts,objetivo   disparo
 
 Z y S se tratan igual: las dos dan de alta una zona. S existe porque el rango de
@@ -73,6 +74,8 @@ class Zona:
     # hora de esa apertura. Sirve para cotejar el estado de arranque.
     estado_s: int | None = None
     t_apertura: datetime | None = None
+    # Instante en que la zona salió de la cola FIFO, si salió.
+    t_purga: datetime | None = None
 
     @property
     def es_htf(self) -> bool:
@@ -114,7 +117,7 @@ def leer(path: Path) -> dict[str, Zona]:
             tipo = None
             off = 0
             for k in (0, 1):
-                if k < len(fila) and fila[k] in ("Z", "S", "E", "D"):
+                if k < len(fila) and fila[k] in ("Z", "S", "E", "P", "D"):
                     tipo, off = fila[k], k
                     break
             if tipo is None:
@@ -153,6 +156,10 @@ def leer(path: Path) -> dict[str, Zona]:
                         zonas[zid].estados.append(
                             (_parse_fecha(campos[1]), int(campos[3]), int(campos[4]), da, dn)
                         )
+                elif tipo == "P" and len(campos) >= 3:
+                    zid = campos[2]
+                    if zid in zonas:
+                        zonas[zid].t_purga = _parse_fecha(campos[1])
             except (ValueError, IndexError):
                 print(f"  aviso: fila ilegible y omitida: {fila}", file=sys.stderr)
     return zonas
@@ -271,11 +278,33 @@ def main() -> None:
         print(f"   {zp.fecha:%Y-%m-%d %H:%M} {zp.marco:>3}: al abrir el rango "
               f"pine={ep} python={eq}")
 
+    # Purga: si un lado retiró la zona de su cola FIFO, el otro no debería
+    # seguir informando cambios de esa zona después. Que lo haga significa que
+    # las colas no están alineadas, y entonces las zonas que un lado olvida y el
+    # otro no falsean toda la comparación. Se reporta aparte de las
+    # discrepancias de estado porque la causa y el arreglo son distintos.
+    purga: list[tuple[Zona, str]] = []
+    for zp, zq in pares:
+        for a, b, quien in ((zp, zq, "pine"), (zq, zp, "python")):
+            if a.t_purga is None:
+                continue
+            posteriores = [e for e in b.estados if e[0] > a.t_purga]
+            if posteriores:
+                otro = "python" if quien == "pine" else "pine"
+                purga.append((zp,
+                    f"purgada en {quien} a las {a.t_purga:%Y-%m-%d %H:%M} pero "
+                    f"{otro} informa {len(posteriores)} cambio(s) después "
+                    f"(el primero a las {min(e[0] for e in posteriores):%H:%M})"))
+
+    print(f"\ndiscrepancias de purga: {len(purga)}")
+    for zp, motivo in purga[:15]:
+        print(f"   {zp.fecha:%Y-%m-%d %H:%M} {zp.marco:>3}: {motivo}")
+
     print(f"\ndiscrepancias de estado en zonas emparejadas: {len(discrepan)}")
     for zp, motivo in discrepan[:15]:
         print(f"   {zp.fecha:%Y-%m-%d %H:%M} {zp.marco:>3}: {motivo}")
 
-    ok = pct >= UMBRAL_EMPAREJADAS and not discrepan and not arranque
+    ok = pct >= UMBRAL_EMPAREJADAS and not discrepan and not arranque and not purga
     print("\n" + ("PARIDAD OK: se puede seguir con la calibración"
                   if ok else
                   "PARIDAD INSUFICIENTE: NO seguir con la calibración"))
@@ -286,6 +315,8 @@ def main() -> None:
             print(f"  {len(discrepan)} discrepancias de estado sin explicar")
         if arranque:
             print(f"  {len(arranque)} zonas llegaron al rango en estados distintos")
+        if purga:
+            print(f"  {len(purga)} zonas con las colas FIFO desalineadas")
     raise SystemExit(0 if ok else 1)
 
 
