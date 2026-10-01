@@ -164,6 +164,14 @@ i_sweepVwap = input.bool(false, "Aplicar los filtros de VWAP a los barridos", gr
                "banda inferior: exigirle el lado correcto del VWAP eliminaría precisamente las señales que este disparador busca. " +
                "Los filtros de VWAP siguen aplicándose a las entradas por FVG, que sí son de continuación.")
 
+// --- Sesiones de referencia (v2 §1.6) ---------------------------------------
+const string G_SSN = "Sesiones de referencia"
+i_sesAsia   = input.session("2000-2359", "Sesión asiática (hora de NY)",     group = G_SSN)
+i_sesLon    = input.session("0200-0500", "Killzone de Londres (hora de NY)", group = G_SSN)
+i_sesSB     = input.session("1000-1100", "Ventana Silver Bullet (hora de NY)", group = G_SSN,
+     tooltip = "Se usa para el fondo de la ventana y, cuando se implementen, para el componente de timing del score y el disparador SB.")
+i_rangosDias = input.int(10, "Días de rangos Asia/Londres en pantalla", minval = 1, maxval = 30, group = G_SSN)
+
 // --- Fuerza de zona ----------------------------------------------------------
 const string G_FUE = "Fuerza de zona"
 i_liqLook   = input.int(12, "Velas de memoria del barrido para el score", minval = 1, maxval = 60, group = G_FUE,
@@ -206,6 +214,20 @@ i_zoneInt   = input.string("Fuerte", "Intensidad de las zonas", options = ["Suav
 i_zoneText  = input.bool(true, "Rotular las zonas (COMPRA / VENTA + marco)", group = G_VIS,
      tooltip = "Escribe dentro de cada caja si es zona de compra o de venta y de qué marco viene, para no tener que deducirlo del color.")
 i_showLvls  = input.bool(true, "Dibujar niveles de sesión",     group = G_VIS)
+i_distMaxATR = input.float(6.0, "Distancia máxima de zonas visibles (x ATR)", minval = 0.5, step = 0.5, group = G_VIS,
+     tooltip = "Una zona viva cuyo 50% esté más lejos de esta distancia deja de dibujarse. Sigue existiendo en el estado: la caja se oculta " +
+               "mutándola, no se borra.")
+i_maxVisLado = input.int(3, "Zonas visibles por lado (5m)", minval = 1, maxval = 10, group = G_VIS,
+     tooltip = "El recorte se aplica solo a las zonas de 5m. Las de 1H y 4H que estén dentro de la distancia se muestran siempre, aunque " +
+               "superen el límite: son las que mandan en la jerarquía.")
+i_verConsum  = input.bool(false, "Mostrar zonas consumidas", group = G_VIS,
+     tooltip = "Desactivado por defecto: una zona consumida ya no sirve de entrada y solo añade ruido. Si se activa, sale en gris apagado " +
+               "y sin texto.")
+i_pasoRedondo = input.string("50", "Paso de números redondos (USD)", options = ["25", "50", "100"], group = G_VIS,
+     tooltip = "Se dibujan solo los dos niveles por encima y los dos por debajo del precio.")
+i_verRedondos = input.bool(true, "Dibujar números redondos", group = G_VIS)
+i_verRangos   = input.bool(true, "Dibujar rangos Asia / Londres", group = G_VIS)
+i_verEtiqLvl  = input.bool(true, "Etiquetar niveles al borde derecho", group = G_VIS)
 i_showVwap  = input.bool(true, "Dibujar VWAP y bandas",         group = G_VIS)
 i_showTable = input.bool(true, "Mostrar tabla de diagnóstico",  group = G_VIS)
 i_showSig   = input.bool(true, "Etiquetas COMPRA / VENTA",      group = G_VIS,
@@ -431,6 +453,72 @@ float vwap   = cumV > 0 ? cumPV / cumV : na
 float vwapSd = cumV > 0 ? math.sqrt(math.max(cumPV2 / cumV - vwap * vwap, 0.0)) : na
 float vwapUp = vwap + i_vwapMult * vwapSd
 float vwapDn = vwap - i_vwapMult * vwapSd
+
+// =============================================================================
+//  4b · RANGOS DE SESIÓN PREVIOS · Asia y Londres (v2 §1.6)
+// =============================================================================
+//  La caja se fija al CERRAR la sesión: mientras está abierta no hay rango
+//  definitivo que dibujar. Una caja por día en cola FIFO, y al salir de la cola
+//  se borra el objeto, que es el único momento en que se borra algo.
+
+bool enAsia = not na(time(timeframe.period, i_sesAsia, "America/New_York"))
+bool enLon  = not na(time(timeframe.period, i_sesLon,  "America/New_York"))
+bool enSB   = not na(time(timeframe.period, i_sesSB,   "America/New_York"))
+
+// Acumulación de la sesión en curso.
+var float asiaHi = na
+var float asiaLo = na
+var int   asiaX1 = na
+if enAsia and not enAsia[1]
+    asiaHi := high
+    asiaLo := low
+    asiaX1 := bar_index
+else if enAsia
+    asiaHi := math.max(nz(asiaHi, high), high)
+    asiaLo := math.min(nz(asiaLo, low),  low)
+
+var float lonHi = na
+var float lonLo = na
+var int   lonX1 = na
+if enLon and not enLon[1]
+    lonHi := high
+    lonLo := low
+    lonX1 := bar_index
+else if enLon
+    lonHi := math.max(nz(lonHi, high), high)
+    lonLo := math.min(nz(lonLo, low),  low)
+
+// Último rango asiático ya cerrado. Lo necesitan el disparador ASIA y la
+// confluencia del score, así que se conserva aparte del dibujo.
+var float asiaHiFijo = na
+var float asiaLoFijo = na
+
+var array<box>  boxAsia = array.new<box>()
+var array<line> midAsia = array.new<line>()
+var array<box>  boxLon  = array.new<box>()
+
+if (not enAsia) and enAsia[1] and not na(asiaHi)
+    asiaHiFijo := asiaHi
+    asiaLoFijo := asiaLo
+    if i_verRangos
+        array.push(boxAsia, box.new(asiaX1, asiaHi, bar_index, asiaLo,
+             border_color = color.new(color.blue, 55), bgcolor = color.new(color.blue, 93),
+             border_width = 1))
+        float mid = (asiaHi + asiaLo) / 2.0
+        array.push(midAsia, line.new(asiaX1, mid, bar_index, mid,
+             color = color.new(color.blue, 40), style = line.style_dotted, width = 1))
+    while array.size(boxAsia) > i_rangosDias
+        box.delete(array.shift(boxAsia))
+    while array.size(midAsia) > i_rangosDias
+        line.delete(array.shift(midAsia))
+
+if (not enLon) and enLon[1] and not na(lonHi)
+    if i_verRangos
+        array.push(boxLon, box.new(lonX1, lonHi, bar_index, lonLo,
+             border_color = color.new(color.orange, 60), bgcolor = color.new(color.orange, 94),
+             border_width = 1))
+    while array.size(boxLon) > i_rangosDias
+        box.delete(array.shift(boxLon))
 
 // =============================================================================
 //  5 · FAIR VALUE GAPS
@@ -662,6 +750,18 @@ f_ocultarZona(Zona z) =>
         box.set_border_color(z.bx, color.new(color.gray, 100))
         box.set_text(z.bx, "")
 
+// Devuelve una zona a su aspecto normal por estado, tras haber estado oculta.
+f_restaurarZona(Zona z) =>
+    if not na(z.bx)
+        box.set_bgcolor(z.bx, f_zoneColor(z.dir, z.state))
+        box.set_border_color(z.bx, f_zoneBorder(z.dir, z.state))
+        box.set_border_width(z.bx, f_zoneWidth(z.prio))
+        box.set_border_style(z.bx, z.state >= 2 ? line.style_dashed : line.style_solid)
+        if i_zoneText
+            box.set_text(z.bx, z.state >= 2 ? "" : f_zoneLabel(z.dir, z.tf, z.inverted, z.state))
+            box.set_text_color(z.bx, color.new(z.dir == 1 ? color.green : color.red, 0))
+            box.set_text_size(z.bx, size.small)
+
 f_destacarZona(Zona z) =>
     if not na(z.bx)
         color col = z.dir == 1 ? color.green : color.red
@@ -734,6 +834,40 @@ if i_soloAlta and barstate.isconfirmed and array.size(zones) > 0
                     line.set_xy2(ln, bar_index + 3,  zb.mid)
                     line.set_color(ln, color.new(zb.dir == 1 ? color.green : color.red, 20))
                     slot += 1
+
+else if barstate.isconfirmed and array.size(zones) > 0
+    // --- Modo normal (v2 §1.1 a §1.3) ---------------------------------------
+    //  Tres reglas: fuera del radio de ATR no se dibuja, las consumidas se
+    //  ocultan salvo que se pidan, y el número de zonas de 5m por lado se
+    //  recorta. Las de 1H y 4H dentro del radio se muestran siempre, porque son
+    //  las que mandan en la jerarquía.
+    for i = 0 to array.size(zones) - 1
+        Zona z = array.get(zones, i)
+        float dz      = math.abs(z.mid - close)
+        float dATR    = na(atr) ? 1e12 : dz / atr
+        bool  cerca   = dATR <= i_distMaxATR
+        bool  consum  = z.state >= 2
+        bool  mostrar = cerca and ((not consum) or i_verConsum)
+
+        // El recorte por lado solo afecta a las de 5m, y conserva las más
+        // cercanas: se cuenta cuántas de 5m del mismo lado están más cerca.
+        if mostrar and z.prio == 1
+            int masCerca = 0
+            for j = 0 to array.size(zones) - 1
+                if j != i
+                    Zona w = array.get(zones, j)
+                    if w.prio == 1 and w.state <= 1
+                        float dw = math.abs(w.mid - close)
+                        bool  mismoLado = (w.mid > close) == (z.mid > close)
+                        bool  wCerca = na(atr) ? false : dw / atr <= i_distMaxATR
+                        if mismoLado and wCerca and dw < dz
+                            masCerca += 1
+            mostrar := masCerca < i_maxVisLado
+
+        if mostrar
+            f_restaurarZona(z)
+        else
+            f_ocultarZona(z)
 
 // =============================================================================
 //  6 · SELECCIÓN DE LA ZONA QUE DISPARA
@@ -1168,12 +1302,15 @@ plot(verExtras and i_showVwap and inSession ? vwapDn : na, "VWAP -σ",     color
 
 // PDH y PDL: única referencia de contexto que sobrevive al modo limpio, en gris
 // fino y sin etiqueta.
+//  §1.5 pide PDH/PDL a 2 px y los de sesión punteados: `plot` no tiene estilo
+//  punteado, así que los de sesión quedan en stepline de 1 px, que es lo más
+//  tenue disponible sin pasarlos a objetos `line`.
 plot(i_showLvls ? pdh : na, "Máx. día anterior",
      color = i_soloAlta ? color.new(color.gray, 45) : color.new(color.blue, 30),
-     style = i_soloAlta ? plot.style_linebr : plot.style_circles, linewidth = 1)
+     style = plot.style_linebr, linewidth = i_soloAlta ? 1 : 2)
 plot(i_showLvls ? pdl : na, "Mín. día anterior",
      color = i_soloAlta ? color.new(color.gray, 45) : color.new(color.blue, 30),
-     style = i_soloAlta ? plot.style_linebr : plot.style_circles, linewidth = 1)
+     style = plot.style_linebr, linewidth = i_soloAlta ? 1 : 2)
 plot(verExtras and i_showLvls and inSession ? sessHigh : na, "Máx. sesión",     color = color.new(color.purple, 40), style = plot.style_stepline)
 plot(verExtras and i_showLvls and inSession ? sessLow  : na, "Mín. sesión",     color = color.new(color.purple, 40), style = plot.style_stepline)
 plot(verExtras and i_showLvls and inSession ? sessOpen : na, "Apertura sesión", color = color.new(color.gray,   40), style = plot.style_stepline)
@@ -1186,6 +1323,89 @@ plotshape(verExtras and bosUp,     "BOS alcista",        shape.circle,       loc
 plotshape(verExtras and bosDn,     "BOS bajista",        shape.circle,       location.abovebar, color.new(color.maroon, 40), size = size.tiny)
 plotshape(verExtras and sweepBull, "Barrido de mínimos", shape.xcross,       location.belowbar, color.new(color.aqua,    0), size = size.tiny)
 plotshape(verExtras and sweepBear, "Barrido de máximos", shape.xcross,       location.abovebar, color.new(color.fuchsia, 0), size = size.tiny)
+
+// Fondo de la ventana Silver Bullet, en un tono distinto y más tenue que el de
+// la ventana de operativa. Dos fondos superpuestos es el límite de lo legible.
+bgcolor(verExtras and enSB ? color.new(color.yellow, 90) : na, title = "Ventana Silver Bullet")
+
+// =============================================================================
+//  9b · NÚMEROS REDONDOS (v2 §1.7)
+// =============================================================================
+//  Cuatro líneas creadas una vez y movidas en barstate.islast: los dos niveles
+//  por encima y los dos por debajo del precio. Nada más, para no tapar el
+//  gráfico con una rejilla.
+var array<line> lnRedondos = array.new<line>()
+if barstate.isfirst
+    for k = 0 to 3
+        array.push(lnRedondos, line.new(bar_index, close, bar_index, close,
+             color = color.new(color.gray, 100), style = line.style_dotted, width = 1))
+
+float pasoRed = str.tonumber(i_pasoRedondo)
+if barstate.islast and array.size(lnRedondos) == 4
+    bool verRed = verExtras and i_verRedondos and not na(pasoRed) and pasoRed > 0
+    float base  = verRed ? math.floor(close / pasoRed) * pasoRed : na
+    for k = 0 to 3
+        line ln = array.get(lnRedondos, k)
+        if verRed
+            // k = 0,1 por encima · k = 2,3 por debajo
+            float lvl = k <= 1 ? base + pasoRed * (k + 1) : base - pasoRed * (k - 2)
+            line.set_xy1(ln, bar_index - 60, lvl)
+            line.set_xy2(ln, bar_index + 3,  lvl)
+            line.set_color(ln, color.new(color.gray, 55))
+        else
+            line.set_color(ln, color.new(color.gray, 100))
+
+// =============================================================================
+//  9c · ETIQUETAS DE NIVEL AL BORDE DERECHO (v2 §1.5)
+// =============================================================================
+//  Una etiqueta por nivel, creada una vez y movida solo en la última vela.
+var label lbPdh  = na
+var label lbPdl  = na
+var label lbSsH  = na
+var label lbSsL  = na
+var label lbSsO  = na
+var label lbVwap = na
+
+f_moverEtiq(label lb, float y, string txt, color col) =>
+    if not na(lb)
+        if na(y)
+            label.set_text(lb, "")
+            label.set_textcolor(lb, color.new(color.gray, 100))
+        else
+            label.set_xy(lb, bar_index + 3, y)
+            label.set_text(lb, txt)
+            label.set_textcolor(lb, col)
+
+if barstate.islast
+    bool verEtiq = verExtras and i_verEtiqLvl
+    if verEtiq and na(lbPdh)
+        lbPdh  := label.new(bar_index + 3, close, "", style = label.style_label_left,
+             color = color.new(color.gray, 100), textcolor = chart.fg_color, size = size.small)
+        lbPdl  := label.new(bar_index + 3, close, "", style = label.style_label_left,
+             color = color.new(color.gray, 100), textcolor = chart.fg_color, size = size.small)
+        lbSsH  := label.new(bar_index + 3, close, "", style = label.style_label_left,
+             color = color.new(color.gray, 100), textcolor = chart.fg_color, size = size.small)
+        lbSsL  := label.new(bar_index + 3, close, "", style = label.style_label_left,
+             color = color.new(color.gray, 100), textcolor = chart.fg_color, size = size.small)
+        lbSsO  := label.new(bar_index + 3, close, "", style = label.style_label_left,
+             color = color.new(color.gray, 100), textcolor = chart.fg_color, size = size.small)
+        lbVwap := label.new(bar_index + 3, close, "", style = label.style_label_left,
+             color = color.new(color.gray, 100), textcolor = chart.fg_color, size = size.small)
+
+    if verEtiq
+        f_moverEtiq(lbPdh,  pdh,      "PDH "  + str.tostring(pdh,      format.mintick), color.new(color.blue,   0))
+        f_moverEtiq(lbPdl,  pdl,      "PDL "  + str.tostring(pdl,      format.mintick), color.new(color.blue,   0))
+        f_moverEtiq(lbSsH,  sessHigh, "SesH " + str.tostring(sessHigh, format.mintick), color.new(color.purple, 0))
+        f_moverEtiq(lbSsL,  sessLow,  "SesL " + str.tostring(sessLow,  format.mintick), color.new(color.purple, 0))
+        f_moverEtiq(lbSsO,  sessOpen, "Open " + str.tostring(sessOpen, format.mintick), color.new(color.gray,  20))
+        f_moverEtiq(lbVwap, vwap,     "VWAP " + str.tostring(vwap,     format.mintick), color.new(color.orange, 0))
+    else
+        f_moverEtiq(lbPdh,  na, "", chart.fg_color)
+        f_moverEtiq(lbPdl,  na, "", chart.fg_color)
+        f_moverEtiq(lbSsH,  na, "", chart.fg_color)
+        f_moverEtiq(lbSsL,  na, "", chart.fg_color)
+        f_moverEtiq(lbSsO,  na, "", chart.fg_color)
+        f_moverEtiq(lbVwap, na, "", chart.fg_color)
 
 // =============================================================================
 //  10 · TABLA DE DIAGNÓSTICO
