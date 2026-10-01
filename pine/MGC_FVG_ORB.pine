@@ -253,10 +253,15 @@ i_logZonas  = input.bool(false, "Exportar zonas a Pine Logs", group = G_LOG,
                "entrada. Sirve para la prueba de paridad contra la detección en Python, que es lo que desbloquea la calibración.\n\n" +
                "NINGUNA lógica de trading depende de este input: solo escribe. Cargar en OANDA:XAUUSD 5m y exportar también las velas de " +
                "esos mismos días, porque la paridad se compara contra las MISMAS velas que vio Pine.")
-i_logDesde  = input.time(timestamp("2026-09-01T00:00:00"), "Log desde", group = G_LOG,
-     tooltip = "El panel de Pine Logs tiene un límite de líneas: sin acotar el rango, los días que interesan se pierden entre miles de " +
-               "registros anteriores. Acotarlo deja el panel con solo los días de la prueba.")
-i_logHasta  = input.time(timestamp("2026-09-30T23:59:00"), "Log hasta", group = G_LOG)
+//  El defecto es UN SOLO DÍA, no un mes. El panel de Pine Logs tiene un límite
+//  de líneas, y un mes de registros lo desborda: los días que interesan se
+//  pierden entre miles de líneas anteriores, que es justo el problema que este
+//  rango existe para evitar. La prueba de paridad se hace día a día, un fichero
+//  por día, así que un día por pasada es también la unidad de trabajo.
+i_logDesde  = input.time(timestamp("2026-09-15T00:00:00"), "Log desde", group = G_LOG,
+     tooltip = "Un solo día por pasada. El panel de Pine Logs tiene un límite de líneas y un rango amplio lo desborda, dejando fuera " +
+               "precisamente los días que se quieren comparar. Para los tres días de la prueba, tres pasadas y tres ficheros.")
+i_logHasta  = input.time(timestamp("2026-09-15T23:59:00"), "Log hasta", group = G_LOG)
 
 // --- Medición (v2 §5) --------------------------------------------------------
 const string G_MED = "Medición"

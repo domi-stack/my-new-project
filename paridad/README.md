@@ -26,8 +26,9 @@ Sobre un gráfico de **OANDA:XAUUSD en 5 minutos**, y de los **mismos tres días
 **b) Los registros de zonas.**
 
 1. Cargar `pine/MGC_FVG_ORB.pine` en ese mismo gráfico.
-2. En **Exportación**, activar `Exportar zonas a Pine Logs` y fijar `Log desde` / `Log hasta` a los tres días elegidos. Acotar el rango importa: el panel tiene un límite de líneas y sin acotarlo los días que interesan se pierden entre miles de registros anteriores.
-3. Copiar el panel de Pine Logs a `paridad/pine_logs_YYYYMMDD.csv`, un fichero por día.
+2. En **Exportación**, activar `Exportar zonas a Pine Logs` y fijar `Log desde` / `Log hasta` a **un solo día**. El panel tiene un límite de líneas y un rango amplio lo desborda, dejando fuera precisamente los días que se quieren comparar.
+3. Copiar el panel de Pine Logs a `paridad/pine_logs_YYYYMMDD.csv`.
+4. Repetir para cada uno de los tres días: **tres pasadas, tres ficheros**. No intentar sacar los tres en una.
 
 Elegir tres días de carácter distinto, que es lo que pide la especificación: uno de tendencia clara, uno de rango y uno con dato macro fuerte (NFP, IPC, FOMC).
 
