@@ -2,20 +2,34 @@
 
 Esto es lo que desbloquea la calibración. V2.1 §1.2 lo exige y es categórico: *"Si no coinciden, no se sigue. Una calibración sobre zonas distintas de las que dibuja el script no vale nada."*
 
-El bloqueo no son los datos — están disponibles, trece años de M1 en el espejo `kk-at-5/xauusd-raw-data`, ya contrastados contra un feed independiente de OANDA con diferencia mediana de 0,11 USD. El bloqueo es que esta prueba **requiere ejecutar Pine**, y eso solo lo puedes hacer tú.
+El bloqueo es que esta prueba **requiere ejecutar Pine**, y eso solo lo puedes hacer tú. No son los datos: para la calibración larga hay trece años de M1 en el espejo `kk-at-5/xauusd-raw-data`, pero ese espejo no es lo que se usa en esta prueba — ver el apartado siguiente.
 
-## Paso 1 · Generar los Pine Logs
+## Lo que esta prueba mide, y lo que no
 
-**El instrumento importa.** Los datos de Python son **XAUUSD spot**. Si cargas el script en MGC1! las zonas no van a coincidir: distinto feed, base futuros−spot variable y distinto tratamiento del parón de CME. Para la paridad hay que usar **OANDA:XAUUSD en 5 minutos**, que es el feed contra el que se contrastaron los datos.
+Son **dos pruebas distintas** y conviene no mezclarlas:
 
-1. Cargar `pine/MGC_FVG_ORB.pine` en un gráfico de **OANDA:XAUUSD, 5m**.
-2. Activar **Exportación → Exportar zonas a Pine Logs**.
-3. Abrir el panel de Pine Logs.
-4. Elegir **tres días concretos** con carácter distinto, que es lo que pide la especificación:
-   - uno de tendencia clara
-   - uno de rango
-   - uno con dato macro fuerte (NFP, IPC, FOMC)
-5. Copiar el contenido del panel a `paridad/pine_logs_YYYYMMDD.csv`, un fichero por día, y subirlos.
+| Prueba | Qué compara | ¿Bloquea la calibración? |
+|---|---|---|
+| **Paridad de código** | La detección de Pine contra la de Python, **sobre las mismas velas** | **Sí.** Es la de §1.2 |
+| Paridad de datos | El espejo de GitHub contra el feed de OANDA | No. Es una comprobación aparte |
+
+La paridad de código exige alimentar a Python con **las mismas velas que vio Pine**. Si Python lee el espejo de GitHub y Pine lee OANDA, cualquier diferencia que salga puede venir del feed y no del código, y entonces la prueba no distingue lo que pretende distinguir. Por eso hay que exportar también las velas desde TradingView.
+
+La comparación espejo contra OANDA tiene su valor —dice si los datos de calibración representan bien el feed real— pero es un asunto separado y no bloquea nada. Lo que ya se sabe de ella: sobre 4.732 minutos solapados la diferencia mediana de cierre era de 0,11 USD.
+
+## Paso 1 · Exportar de TradingView las DOS cosas
+
+Sobre un gráfico de **OANDA:XAUUSD en 5 minutos**, y de los **mismos tres días** en los dos casos:
+
+**a) Las velas.** Exportar los datos del gráfico a CSV (menú del gráfico, *Export chart data*). Guardar en `paridad/velas_YYYYMMDD.csv`. Estas son las velas que comerá el detector de Python.
+
+**b) Los registros de zonas.**
+
+1. Cargar `pine/MGC_FVG_ORB.pine` en ese mismo gráfico.
+2. En **Exportación**, activar `Exportar zonas a Pine Logs` y fijar `Log desde` / `Log hasta` a los tres días elegidos. Acotar el rango importa: el panel tiene un límite de líneas y sin acotarlo los días que interesan se pierden entre miles de registros anteriores.
+3. Copiar el panel de Pine Logs a `paridad/pine_logs_YYYYMMDD.csv`, un fichero por día.
+
+Elegir tres días de carácter distinto, que es lo que pide la especificación: uno de tendencia clara, uno de rango y uno con dato macro fuerte (NFP, IPC, FOMC).
 
 El panel puede prefijar la hora del navegador en cada línea; el comparador lo tolera, no hace falta limpiarlo.
 
@@ -23,22 +37,27 @@ El panel puede prefijar la hora del navegador en cada línea; el comparador lo t
 
 ```
 Z,fecha,id,marco,dir,top,bot,mid,estado          alta de zona
+S,fecha,id,marco,dir,top,bot,mid,estado          zona ya viva al abrir el rango
 E,fecha,id,est_ant,est_nuevo,dir_ant,dir_nuevo   cambio de estado o inversión
 D,fecha,id,disparador,dir,entrada,stop,stop_pts,objetivo   disparo de entrada
 ```
 
 Fechas en `America/New_York`. `dir` es 1 para zona de compra y −1 para zona de venta. Los estados son 0 virgen, 1 mitigada parcial, 2 consumida.
 
-**Ninguna lógica de trading depende del input de exportación**: los tres bloques que lo consultan solo escriben. Está verificado por búsqueda y conviene volver a verificarlo si alguien toca esa parte.
+**Z y S se tratan igual**: las dos dan de alta una zona. `S` existe porque el rango de exportación recorta los logs, y sin un inventario de las zonas que ya estaban vivas al abrirlo, el comparador las contaría como "solo en Python" y hundiría el porcentaje de emparejadas sin motivo. En `S` el estado y la dirección son los **actuales**, que pueden no ser los del nacimiento si la zona ya se mitigó o se invirtió.
 
-## Paso 2 · Comparar
+**Ninguna lógica de trading depende del input de exportación**: los cuatro bloques que lo consultan solo escriben. Está verificado por búsqueda y conviene volver a verificarlo si alguien toca esa parte.
+
+## Paso 2 · Comparar la detección
 
 ```bash
 python3 paridad/comparar.py paridad/pine_logs_20260915.csv \
                             paridad/python_zonas_20260915.csv
 ```
 
-El comparador empareja zonas por fecha de nacimiento, marco y dirección, con tolerancia de 0,3 USD en precio y 5 minutos en la fecha, porque los ids de las dos implementaciones no tienen por qué coincidir. Informa de las zonas que solo ve un lado y de las discrepancias de estado entre las que sí se emparejaron.
+El comparador empareja zonas por fecha de nacimiento, marco y dirección, con tolerancia de 0,3 USD en precio y 5 minutos en la fecha, porque los ids de las dos implementaciones no tienen por qué coincidir. Informa de las zonas que solo ve un lado y de las discrepancias entre las emparejadas.
+
+En cada cambio de estado compara el estado anterior y el nuevo, la dirección anterior y la nueva, y la **hora** del cambio: sin margen en el marco del gráfico, porque ahí el cambio tiene que caer en la misma vela, y con una vela de 5m de margen en marcos superiores, porque el momento en que cada implementación ve la vela superior cerrada puede diferir en un paso.
 
 Sale con código 0 solo si se cumplen los dos criterios de §1.2:
 
@@ -49,7 +68,7 @@ Si no se cumplen, no se sigue. No se baja el umbral.
 
 ## Paso 3 · Qué falta por escribir
 
-El detector en Python (`paridad/detectar.py`) **todavía no existe**. Tiene que reimplementar exactamente lo que hace el `.pine`:
+El detector en Python (`paridad/detectar.py`) **todavía no existe**. Leerá `paridad/velas_YYYYMMDD.csv` —las velas exportadas de TradingView, no el espejo de GitHub— y tiene que reimplementar exactamente lo que hace el `.pine`:
 
 - FVG de tres velas, anchura mínima 0,5×ATR(14)
 - CE al 50 %
@@ -57,7 +76,9 @@ El detector en Python (`paridad/detectar.py`) **todavía no existe**. Tiene que 
 - margen de invalidación 0,25×ATR
 - zonas de 1H y 4H solo después de cerrar su vela
 
-Se escribe cuando haya al menos un fichero de Pine Logs contra el que contrastarlo. Escribirlo antes es trabajar a ciegas: cualquier diferencia de interpretación saldría solo al comparar, y sin el fichero de referencia no se puede comparar.
+Se escribe cuando haya al menos un par de ficheros —velas y logs del mismo día— contra el que contrastarlo. Escribirlo antes es trabajar a ciegas: cualquier diferencia de interpretación saldría solo al comparar, y sin los ficheros de referencia no se puede comparar.
+
+Una vez haya paridad de código, la calibración sí puede correr sobre el histórico largo del espejo de GitHub: para entonces se sabrá que el detector reproduce lo que hace el script, y lo que hace falta son los trece años de velas que TradingView no exporta de una vez.
 
 ## Paso 4 · Validación en futuros antes de operar
 
