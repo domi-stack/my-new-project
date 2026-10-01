@@ -153,6 +153,15 @@ i_sweepVwap = input.bool(false, "Aplicar los filtros de VWAP a los barridos", gr
                "banda inferior: exigirle el lado correcto del VWAP eliminaría precisamente las señales que este disparador busca. " +
                "Los filtros de VWAP siguen aplicándose a las entradas por FVG, que sí son de continuación.")
 
+// --- Fuerza de zona ----------------------------------------------------------
+const string G_FUE = "Fuerza de zona"
+i_liqLook   = input.int(12, "Velas de memoria del barrido para el score", minval = 1, maxval = 60, group = G_FUE,
+     tooltip = "Una zona puntúa por 'liquidez previa' si nació dentro de este número de velas tras un barrido del lado contrario.")
+i_minScore  = input.int(0, "Fuerza mínima para operar (0 = desactivado)", minval = 0, maxval = 100, group = G_FUE,
+     tooltip = "ÚNICO sitio donde la puntuación influye en una decisión de trading. Con 0 la puntuación es solo lectura: colorea las zonas " +
+               "y alimenta el texto de acción, pero no veta nada. No lo subas hasta haber comprobado que el tier FUERTE supera de verdad al " +
+               "DÉBIL en esperanza, con al menos 40 operaciones en cada uno.")
+
 // --- Visual ------------------------------------------------------------------
 const string G_VIS = "Visual"
 i_showBoxes = input.bool(true, "Dibujar zonas",                 group = G_VIS)
@@ -346,21 +355,48 @@ float vwapDn = vwap - i_vwapMult * vwapSd
 //  cambia de signo, vuelve al estado 0 y pasa a ser operable en sentido
 //  contrario (un FVG bajista roto al alza se convierte en soporte).
 
-type FVG
+type Zona
+    // --- geometría
     float  top
     float  bot
     float  mid
+    // --- identidad
     int    dir        //  1 = alcista (soporte) · -1 = bajista (resistencia)
     string tf         // "5m" / "1H" / "4H"
     int    prio       //  3 = marco mayor · 2 = intermedio · 1 = actual
+    float  tfAtr      // ATR de SU PROPIO marco, para medir el desplazamiento
+    // --- estado
     int    state
     bool   inverted   // ha cambiado de signo alguna vez
     bool   fired      // ya generó una señal: no vuelve a disparar
-    int    ceBar      // vela en la que se perforó el 50% (disparo)
+    int    ceBar      // vela que dispara la entrada según el modo elegido
     int    bornBar    // vela de creación: en ella no se evalúa mitigación
+    bool   liqPrevia  // nació poco después de un barrido del lado contrario
+    // --- fuerza (fase 2)
+    int    score
+    int    tier       // 0 débil · 1 media · 2 fuerte
+    string scoreTxt   // desglose para el tooltip
+    // --- dibujo
     box    bx
+    bool   visible    // la caja se oculta mutándola, nunca se borra en vida
 
-var array<FVG> zones = array.new<FVG>()
+var array<Zona> zones = array.new<Zona>()
+
+// =============================================================================
+//  REGISTRO DE OPERACIONES
+// =============================================================================
+//  Una entrada por operación, en el mismo orden en que el Strategy Tester las
+//  cierra (pyramiding = 0, una posición a la vez), de modo que el índice de
+//  strategy.closedtrades sirve de índice aquí. El riesgo planificado se guarda
+//  AL ENTRAR y no se recalcula: R = PnL / riesgo planificado.
+type Operacion
+    string disparador   // FVG5 · FVG1H · FVG4H · SWP · SB · ASIA
+    int    tier         // tier de la zona en el momento de la entrada
+    float  riesgoUSD    // riesgo planificado, en USD
+    float  stopPts      // anchura del stop, en puntos
+    int    entryBar
+
+var array<Operacion> ops = array.new<Operacion>()
 
 // --- Aspecto de las zonas ---------------------------------------------------
 //  Verde = zona de COMPRA (soporte), rojo = zona de VENTA (resistencia).
@@ -389,10 +425,18 @@ f_zoneLabel(int dir, string tfName, bool inv, int state) =>
     s += state >= 2 ? " ✕" : ""
     s
 
-f_addZone(float top, float bot, int dir, string tfName, int prio) =>
-    FVG z = FVG.new(top = top, bot = bot, mid = (top + bot) / 2.0, dir = dir, tf = tfName,
-                    prio = prio, state = 0, inverted = false, fired = false, ceBar = -1,
-                    bornBar = bar_index, bx = na)
+// Liquidez previa: ¿nació esta zona poco después de un barrido del lado
+// contrario? Una zona alcista vale más si antes se barrieron mínimos.
+f_liqPrevia(int dir) =>
+    int n = i_liqLook
+    dir == 1 ? nz(ta.barssince(sweepBull), 999999) <= n
+             : nz(ta.barssince(sweepBear), 999999) <= n
+
+f_addZone(float top, float bot, int dir, string tfName, int prio, float tfAtr) =>
+    Zona z = Zona.new(top = top, bot = bot, mid = (top + bot) / 2.0, dir = dir, tf = tfName,
+                    prio = prio, tfAtr = tfAtr, state = 0, inverted = false, fired = false,
+                    ceBar = -1, bornBar = bar_index, liqPrevia = f_liqPrevia(dir),
+                    score = 0, tier = 0, scoreTxt = "", bx = na, visible = true)
     if i_showBoxes
         z.bx := box.new(bar_index, top, bar_index, bot,
              border_color = f_zoneBorder(dir, 0),
@@ -401,12 +445,12 @@ f_addZone(float top, float bot, int dir, string tfName, int prio) =>
              text         = i_zoneText ? f_zoneLabel(dir, tfName, false, 0) : "",
              text_color   = color.new(dir == 1 ? color.green : color.red, 0),
              text_size    = size.small,
-             text_halign  = text.align_left,
+             text_halign  = text.align_right,
              text_valign  = text.align_center)
     array.push(zones, z)
     // Poda por antigüedad: se descarta la zona más vieja para acotar memoria.
     while array.size(zones) > i_maxZones
-        FVG old = array.shift(zones)
+        Zona old = array.shift(zones)
         if not na(old.bx)
             box.delete(old.bx)
 
@@ -416,23 +460,25 @@ f_addZone(float top, float bot, int dir, string tfName, int prio) =>
 if barstate.isconfirmed and not na(atr)
     float minW = i_fvgMinMult * atr
     if low > high[2] and (low - high[2]) >= minW
-        f_addZone(low, high[2], 1, "5m", 1)
+        f_addZone(low, high[2], 1, "5m", 1, atr)
     if high < low[2] and (low[2] - high) >= minW
-        f_addZone(low[2], high, -1, "5m", 1)
+        f_addZone(low[2], high, -1, "5m", 1, atr)
 
 // --- Detección en marcos superiores -----------------------------------------
 //  Se evalúa con desplazamiento [1]/[3] para que el patrón de 3 velas esté
 //  cerrado en el propio marco superior, y con lookahead_off. Así el FVG del
 //  marco mayor aparece cuando de verdad existe, nunca antes.
+//  Devuelve también el ATR del propio marco, en la misma tupla, para que la
+//  fase 2 pueda medir el desplazamiento sin añadir llamadas nuevas.
 f_htfFvg(int atrLen, float minMult) =>
     float a    = ta.atr(atrLen)
     bool  bull = low[1]  > high[3] and (low[1] - high[3]) >= minMult * a
     bool  bear = high[1] < low[3]  and (low[3] - high[1]) >= minMult * a
-    [time, bull, low[1], high[3], bear, low[3], high[1]]
+    [time, bull, low[1], high[3], bear, low[3], high[1], a]
 
-[t1, bull1, bull1Top, bull1Bot, bear1, bear1Top, bear1Bot] =
+[t1, bull1, bull1Top, bull1Bot, bear1, bear1Top, bear1Bot, atr1h] =
      request.security(syminfo.tickerid, i_tf1, f_htfFvg(i_atrLen, i_fvgMinMult), lookahead = barmerge.lookahead_off)
-[t2, bull2, bull2Top, bull2Bot, bear2, bear2Top, bear2Bot] =
+[t2, bull2, bull2Top, bull2Bot, bear2, bear2Top, bear2Bot, atr4h] =
      request.security(syminfo.tickerid, i_tf2, f_htfFvg(i_atrLen, i_fvgMinMult), lookahead = barmerge.lookahead_off)
 
 bool newHtf1 = not na(t1) and t1 != nz(t1[1], 0)
@@ -440,22 +486,22 @@ bool newHtf2 = not na(t2) and t2 != nz(t2[1], 0)
 
 if barstate.isconfirmed and i_useHtf1 and newHtf1
     if bull1
-        f_addZone(bull1Top, bull1Bot, 1, "1H", 2)
+        f_addZone(bull1Top, bull1Bot, 1, "1H", 2, nz(atr1h, atr))
     if bear1
-        f_addZone(bear1Top, bear1Bot, -1, "1H", 2)
+        f_addZone(bear1Top, bear1Bot, -1, "1H", 2, nz(atr1h, atr))
 
 if barstate.isconfirmed and i_useHtf2 and newHtf2
     if bull2
-        f_addZone(bull2Top, bull2Bot, 1, "4H", 3)
+        f_addZone(bull2Top, bull2Bot, 1, "4H", 3, nz(atr4h, atr))
     if bear2
-        f_addZone(bear2Top, bear2Bot, -1, "4H", 3)
+        f_addZone(bear2Top, bear2Bot, -1, "4H", 3, nz(atr4h, atr))
 
 // --- Máquina de estados y mantenimiento de las cajas ------------------------
 bool  entryOn50 = i_entryMode == "Cierre en el 50%"
 float invM = nz(i_invMargin * atr, 0.0)
 if barstate.isconfirmed and array.size(zones) > 0
     for i = 0 to array.size(zones) - 1
-        FVG z = array.get(zones, i)
+        Zona z = array.get(zones, i)
 
         // En la vela de creación no se evalúa mitigación: el borde del hueco es
         // por definición el mínimo (o el máximo) de esa vela, así que el test de
@@ -518,12 +564,12 @@ if barstate.isconfirmed and array.size(zones) > 0
 //  disparado antes. Si varias coinciden, manda la de marco mayor (prio) y, a
 //  igualdad de marco, la más cercana al precio.
 
-FVG pick = na
+Zona pick = na
 if barstate.isconfirmed and array.size(zones) > 0
     int   bestPrio = 0
     float bestDist = 1e12
     for i = 0 to array.size(zones) - 1
-        FVG z = array.get(zones, i)
+        Zona z = array.get(zones, i)
         if z.ceBar == bar_index and not z.fired
             float d = math.abs(close - z.mid)
             if z.prio > bestPrio or (z.prio == bestPrio and d < bestDist)
@@ -542,7 +588,7 @@ f_htfOppositeLevel(bool isLong, float from) =>
         // Pasada 1: distancia mínima.
         float minD = 1e12
         for i = 0 to array.size(zones) - 1
-            FVG z = array.get(zones, i)
+            Zona z = array.get(zones, i)
             if z.prio >= 2 and z.state <= 1 and (isLong ? z.dir == -1 : z.dir == 1)
                 float near = isLong ? z.bot : z.top
                 if (isLong ? near > from : near < from)
@@ -553,7 +599,7 @@ f_htfOppositeLevel(bool isLong, float from) =>
         // gana la de marco mayor.
         if minD < 1e12
             for i = 0 to array.size(zones) - 1
-                FVG z = array.get(zones, i)
+                Zona z = array.get(zones, i)
                 if z.prio >= 2 and z.state <= 1 and (isLong ? z.dir == -1 : z.dir == 1)
                     float near = isLong ? z.bot : z.top
                     if (isLong ? near > from : near < from)
@@ -603,25 +649,134 @@ f_mtfOk(bool isLong) =>
     ok
 
 // =============================================================================
+//  7b · MÁSCARA DE VETOS
+// =============================================================================
+//  Un bit por veto, y UNA SOLA función que los evalúa. La usan tanto la
+//  ejecución real como la máscara teórica de la capa de acción, para que no
+//  existan dos copias de los filtros que puedan divergir.
+//
+//  Pine no tiene operadores de bits, así que la máscara se construye sumando
+//  (cada veto se evalúa una vez, nunca se suma dos veces) y se consulta con
+//  división entera.
+//
+//  Dos contadores por veto:
+//    BLOQUEA   · cuántos setups vetó, solo o acompañado de otros.
+//    EXCLUSIVO · cuántos vetó ÉL SOLO. Este es el que de verdad informa: dice
+//                cuántas operaciones ganarías relajando ese filtro y nada más.
+//                Un veto que bloquea mucho pero nunca en exclusiva no es el
+//                cuello de botella; otro lo está tapando.
+const int V_VENTANA = 1
+const int V_DIARIO  = 2
+const int V_POSIC   = 4
+const int V_MTF     = 8
+const int V_VWAP    = 16
+const int V_BANDA   = 32
+const int V_BARRIDO = 64
+const int V_STOP    = 128
+const int V_HOLGURA = 256
+const int V_FUERZA  = 512
+const int V_ADR     = 1024
+const int N_VETOS   = 11
+
+var array<int> vetoBloq = array.new_int(N_VETOS, 0)
+var array<int> vetoExcl = array.new_int(N_VETOS, 0)
+var int        nSetups  = 0
+
+f_vetoBit(int idx)  => int(math.pow(2, idx))
+f_vetoTiene(int m, int bit) => int(math.floor(m / bit)) % 2 == 1
+f_vetoName(int idx) =>
+    switch idx
+        0  => "ventana"
+        1  => "límite diario"
+        2  => "posición abierta"
+        3  => "marco mayor"
+        4  => "VWAP"
+        5  => "banda VWAP"
+        6  => "barrido exigido"
+        7  => "stop > techo"
+        8  => "holgura"
+        9  => "fuerza mínima"
+        => "ADR agotado"
+
+// Obstrucción combinada: zonas del marco mayor y, si se han activado, niveles
+// de sesión. Una sola puerta para que la máscara y el objetivo lean lo mismo.
+f_nivelObstruccion(bool isLong, float from) =>
+    float lz = f_htfOppositeLevel(isLong, from)
+    float ls = f_sessionObstacle(isLong, from)
+    na(lz) ? ls : na(ls) ? lz : (isLong ? math.min(lz, ls) : math.max(lz, ls))
+
+// La máscara. `zScore` solo entra por el veto de fuerza mínima, que es el único
+// punto donde la puntuación influye en una decisión de trading.
+f_mascara(int dir, float entrada, float stop, bool esFvg, int zScore) =>
+    bool isLong = dir == 1
+    int  m = 0
+
+    // Contexto, no setup.
+    if (not inWindow) or forceOut
+        m += V_VENTANA
+    if tradesToday >= i_maxTrades
+        m += V_DIARIO
+    if strategy.position_size != 0
+        m += V_POSIC
+
+    if not f_mtfOk(isLong)
+        m += V_MTF
+
+    // Los filtros de VWAP solo se aplican al FVG salvo que se pidan también
+    // para los barridos.
+    bool applyVwap = esFvg or i_sweepVwap
+    if applyVwap and i_useVwap and not na(vwap) and (isLong ? close <= vwap : close >= vwap)
+        m += V_VWAP
+    if applyVwap and i_vwapBand and not na(vwapUp) and (isLong ? close > vwapUp : close < vwapDn)
+        m += V_BANDA
+
+    // Un barrido ya es el barrido: solo se le exige otro previo al FVG.
+    if esFvg and i_reqSweep and not (isLong ? sweepBullRecent : sweepBearRecent)
+        m += V_BARRIDO
+
+    float riskPts = na(stop) ? na : (isLong ? entrada - stop : stop - entrada)
+    if na(riskPts) or riskPts <= 0 or riskPts > i_maxStopPts
+        m += V_STOP
+
+    if modeB and not na(riskPts) and riskPts > 0
+        float lvl = f_nivelObstruccion(isLong, entrada)
+        if not na(lvl)
+            float holgura = isLong ? lvl - entrada : entrada - lvl
+            if holgura < i_minClearR * riskPts
+                m += V_HOLGURA
+
+    if i_minScore > 0 and zScore < i_minScore
+        m += V_FUERZA
+
+    // V_ADR se rellena en la fase 4. Reservado aquí para no volver a tocar la
+    // máscara después.
+
+    m
+
+// Contabiliza una máscara: bloqueo por cada bit presente y exclusivo cuando la
+// máscara ES exactamente ese bit. Solo muta arrays, porque Pine no permite
+// asignar a una variable global desde dentro de una función; el contador de
+// setups se incrementa en el punto de llamada.
+f_contarVetos(int m) =>
+    if m != 0
+        for idx = 0 to N_VETOS - 1
+            int bit = f_vetoBit(idx)
+            if f_vetoTiene(m, bit)
+                array.set(vetoBloq, idx, array.get(vetoBloq, idx) + 1)
+                if m == bit
+                    array.set(vetoExcl, idx, array.get(vetoExcl, idx) + 1)
+
+// =============================================================================
 //  8 · CONSTRUCCIÓN Y EJECUCIÓN DE LA OPERACIÓN
 // =============================================================================
 
 var float  pendStop   = na
 var float  pendTarget = na
+var string openId     = ""   // id del disparador de la posición abierta
 
-bool flat     = strategy.position_size == 0
-bool canTrade = barstate.isconfirmed and inWindow and not forceOut and flat and tradesToday < i_maxTrades
-
-// --- Contadores de diagnóstico ----------------------------------------------
-//  Existen para responder con datos a "salen muy pocas señales": dicen qué
-//  filtro concreto está vetando, en lugar de tener que adivinarlo.
-var int cntSetup = 0    // setups detectados en total
-var int rejGate  = 0    // fuera de ventana, ya operado hoy, o posición abierta
-var int rejMtf   = 0
-var int rejVwap  = 0
-var int rejSweep = 0
-var int rejStop  = 0
-var int rejClear = 0
+// Todos los stops estructurales calculados, operados o no. Es el dato que dice
+// si el techo de puntos es el cuello de botella (fase 5).
+var array<float> stopsVistos = array.new_float()
 
 f_reason(bool isLong, string head) =>
     string s = head
@@ -651,26 +806,10 @@ else if i_useSweep and confBar
         setDir  := -1
         setKind := "Barrido"
 
-if setDir != 0 and confBar
-    cntSetup += 1
-    if not canTrade
-        rejGate += 1
-
-if canTrade and setDir != 0 and not na(atr)
+if setDir != 0 and confBar and not na(atr)
     bool  isLong = setDir == 1
     bool  isFvg  = setKind == "FVG"
     float entry  = close
-
-    // --- Filtros ------------------------------------------------------------
-    bool okMtf = f_mtfOk(isLong)
-    // Los filtros de VWAP solo se aplican al FVG, salvo que se pidan también
-    // para los barridos: un barrido ocurre con el precio hundido o disparado y
-    // fuera de la banda, que es exactamente lo que esos filtros descartan.
-    bool applyVwap = isFvg or i_sweepVwap
-    bool okVwap = (not applyVwap) or (not i_useVwap)  or na(vwap)   or (isLong ? close > vwap   : close < vwap)
-    bool okBand = (not applyVwap) or (not i_vwapBand) or na(vwapUp) or (isLong ? close <= vwapUp : close >= vwapDn)
-    // Un barrido ya es el barrido: no se le exige otro previo.
-    bool okSweep = (not isFvg) or (not i_reqSweep) or (isLong ? sweepBullRecent : sweepBearRecent)
 
     // --- Stop ---------------------------------------------------------------
     float buf     = i_stopBuf * atr
@@ -697,51 +836,50 @@ if canTrade and setDir != 0 and not na(atr)
                        : math.ceil( stop / f_tickPoints) * f_tickPoints
     float riskPts = na(stop) ? na : (isLong ? entry - stop : stop - entry)
 
-    // Techo duro: si la estructura pide más de lo permitido, no se opera.
-    bool okStop = not na(riskPts) and riskPts > 0 and riskPts <= i_maxStopPts
+    if not na(riskPts) and riskPts > 0
+        array.push(stopsVistos, riskPts)
 
-    // Se cuenta el primer filtro que veta, para saber cuál es el que ahoga.
-    if not okMtf
-        rejMtf += 1
-    else if not (okVwap and okBand)
-        rejVwap += 1
-    else if not okSweep
-        rejSweep += 1
-    else if not okStop
-        rejStop += 1
+    // --- Tamaño: nunca menos de 1 contrato, nunca más riesgo del fijado -----
+    int qty = 1
+    if i_scaleUp and not na(riskPts) and riskPts > 0
+        qty := math.max(1, int(math.floor(i_riskUSD / (riskPts * f_pointValue))))
 
-    if okMtf and okVwap and okBand and okSweep and okStop
-        // --- Tamaño: nunca menos de 1 contrato, nunca más riesgo del fijado
-        int qty = 1
-        if i_scaleUp
-            qty := math.max(1, int(math.floor(i_riskUSD / (riskPts * f_pointValue))))
-        bool okRisk = qty * riskPts * f_pointValue <= i_riskUSD + 1e-6
+    // --- Máscara de vetos: una sola evaluación de todos los filtros ---------
+    //  Un barrido no tiene zona, así que la fuerza mínima no le aplica: se le
+    //  pasa 100 para que ese bit nunca se active por su culpa.
+    int zScore = isFvg ? pick.score : 100
+    int mask   = f_mascara(setDir, entry, stop, isFvg, zScore)
+    nSetups   += 1
+    f_contarVetos(mask)
 
+    if mask == 0
         // --- Objetivo -------------------------------------------------------
-        float tgtPts  = i_targetUSD / (qty * f_pointValue)
-        float target  = isLong ? entry + tgtPts : entry - tgtPts
-        bool  okClear = true
+        float tgtPts = i_targetUSD / (qty * f_pointValue)
+        float target = isLong ? entry + tgtPts : entry - tgtPts
 
+        // El nivel del marco mayor recorta el objetivo si queda por delante.
+        // La holgura mínima ya la ha comprobado la máscara.
         if modeB
-            float lvlZone = f_htfOppositeLevel(isLong, entry)
-            float lvlSess = f_sessionObstacle(isLong, entry)
-            float lvl = na(lvlZone) ? lvlSess : na(lvlSess) ? lvlZone :
-                 (isLong ? math.min(lvlZone, lvlSess) : math.max(lvlZone, lvlSess))
+            float lvl = f_nivelObstruccion(isLong, entry)
             if not na(lvl)
-                float clearance = isLong ? lvl - entry : entry - lvl
-                okClear := clearance >= i_minClearR * riskPts
-                // El nivel recorta el objetivo si queda por delante de él.
-                target  := isLong ? math.min(target, lvl - invM) : math.max(target, lvl + invM)
-
-        if not okClear
-            rejClear += 1
+                target := isLong ? math.min(target, lvl - invM) : math.max(target, lvl + invM)
 
         // Objetivo también a la rejilla de ticks, redondeado en contra para no
         // contar como alcanzado un nivel que en real no se habría tocado.
         target := isLong ? math.ceil(target / f_tickPoints) * f_tickPoints
                          : math.floor(target / f_tickPoints) * f_tickPoints
 
-        if okRisk and okClear and (isLong ? target > entry : target < entry)
+        bool okRisk = qty * riskPts * f_pointValue <= i_riskUSD + 1e-6
+
+        // Un id por disparador, para que el Strategy Tester separe resultados.
+        string trigId = ""
+        if isFvg
+            trigId := pick.tf == "4H" ? "FVG4H" : pick.tf == "1H" ? "FVG1H" : "FVG5"
+        else
+            trigId := "SWP"
+        int trigTier = isFvg ? pick.tier : 0
+
+        if okRisk and (isLong ? target > entry : target < entry)
             pendStop   := stop
             pendTarget := target
 
@@ -763,12 +901,21 @@ if canTrade and setDir != 0 and not na(atr)
                  " | riesgo "   + str.tostring(math.round(qty * riskPts * f_pointValue)) + " USD" +
                  " | motivo: "  + f_reason(isLong, head)
 
-            if isLong
-                strategy.entry("L", strategy.long, qty = qty, alert_message = msg)
-                strategy.exit("salida L", from_entry = "L", stop = stop, limit = target, alert_message = "Salida largo MGC")
-            else
-                strategy.entry("S", strategy.short, qty = qty, alert_message = msg)
-                strategy.exit("salida S", from_entry = "S", stop = stop, limit = target, alert_message = "Salida corto MGC")
+            // El comentario de la orden lleva disparador y tier, para poder
+            // reconstruir el resultado por ambos sin trabajo manual.
+            string ordCmt = trigId + " t" + str.tostring(trigTier)
+            strategy.entry(trigId, isLong ? strategy.long : strategy.short,
+                 qty = qty, comment = ordCmt, alert_message = msg)
+            strategy.exit("salida " + trigId, from_entry = trigId, stop = stop, limit = target,
+                 comment_loss = "SL " + trigId, comment_profit = "TP " + trigId,
+                 alert_message = (isLong ? "Salida largo MGC" : "Salida corto MGC"))
+            openId := trigId
+
+            // Registro de la operación: el riesgo planificado se guarda aquí y
+            // no se recalcula después, para que R sea PnL / riesgo real.
+            array.push(ops, Operacion.new(disparador = trigId, tier = trigTier,
+                 riesgoUSD = qty * riskPts * f_pointValue, stopPts = riskPts,
+                 entryBar = bar_index))
 
             // Etiqueta en el gráfico: COMPRA en verde debajo, VENTA en rojo
             // encima. El detalle completo va en el tooltip para no ensuciar.
@@ -790,11 +937,10 @@ if canTrade and setDir != 0 and not na(atr)
                 pick.fired := true
             tradesToday += 1
 
-// Refresco de la protección mientras haya posición abierta.
-if strategy.position_size > 0 and not na(pendStop)
-    strategy.exit("salida L", from_entry = "L", stop = pendStop, limit = pendTarget)
-else if strategy.position_size < 0 and not na(pendStop)
-    strategy.exit("salida S", from_entry = "S", stop = pendStop, limit = pendTarget)
+// Refresco de la protección mientras haya posición abierta. Se dirige al id del
+// disparador que abrió la posición, no a un id fijo.
+if strategy.position_size != 0 and not na(pendStop) and openId != ""
+    strategy.exit("salida " + openId, from_entry = openId, stop = pendStop, limit = pendTarget)
 
 // El cierre forzoso manda sobre stop y objetivo.
 if forceOut and strategy.position_size != 0
@@ -839,7 +985,7 @@ if i_showTable and barstate.islast
 
     if array.size(zones) > 0
         for i = 0 to array.size(zones) - 1
-            FVG z = array.get(zones, i)
+            Zona z = array.get(zones, i)
             if z.state <= 1
                 nAct += 1
                 if z.mid > close and (na(upLvl) or z.mid < upLvl)
@@ -881,16 +1027,26 @@ if i_showTable and barstate.islast
     table.cell(diag, 0, 9, "Zonas activas", text_size = size.small)
     table.cell(diag, 1, 9, str.tostring(nAct) + " de " + str.tostring(array.size(zones)), text_size = size.small)
 
-    // Diagnóstico de escasez de señales: cuántos setups se detectaron y qué
-    // filtro se comió cada uno. El mayor de estos números es el que ahoga.
+    // Diagnóstico de escasez de señales. La fila EXCLUSIVO es la que informa:
+    // cuenta los setups que ese veto bloqueó ÉL SOLO, o sea las operaciones que
+    // ganarías relajándolo y nada más. Un veto que bloquea mucho pero nunca en
+    // exclusiva no es el cuello de botella: hay otro tapándolo.
+    string vExcl = ""
+    string vBloq = ""
+    for idx = 0 to N_VETOS - 1
+        int e = array.get(vetoExcl, idx)
+        int b = array.get(vetoBloq, idx)
+        if e > 0
+            vExcl += (vExcl == "" ? "" : " · ") + f_vetoName(idx) + " " + str.tostring(e)
+        if b > 0
+            vBloq += (vBloq == "" ? "" : " · ") + f_vetoName(idx) + " " + str.tostring(b)
+
     table.cell(diag, 0, 10, "Setups vistos", text_size = size.small)
-    table.cell(diag, 1, 10, str.tostring(cntSetup) + "  ->  " + str.tostring(strategy.closedtrades + strategy.opentrades) + " operados",
-         text_size = size.small)
+    table.cell(diag, 1, 10, str.tostring(nSetups) + "  ->  " +
+         str.tostring(strategy.closedtrades + strategy.opentrades) + " operados", text_size = size.small)
 
-    table.cell(diag, 0, 11, "Vetados por", text_size = size.small)
-    table.cell(diag, 1, 11, "ventana/límite " + str.tostring(rejGate) + " · MTF " + str.tostring(rejMtf) +
-         " · VWAP " + str.tostring(rejVwap), text_size = size.small)
+    table.cell(diag, 0, 11, "Veto EXCLUSIVO", text_size = size.small)
+    table.cell(diag, 1, 11, vExcl == "" ? "ninguno" : vExcl, text_size = size.small)
 
-    table.cell(diag, 0, 12, "", text_size = size.small)
-    table.cell(diag, 1, 12, "barrido " + str.tostring(rejSweep) + " · stop>" + str.tostring(i_maxStopPts, "#") +
-         "pts " + str.tostring(rejStop) + " · holgura " + str.tostring(rejClear), text_size = size.small)
+    table.cell(diag, 0, 12, "Veto (bloquea)", text_size = size.small)
+    table.cell(diag, 1, 12, vBloq == "" ? "ninguno" : vBloq, text_size = size.small)
