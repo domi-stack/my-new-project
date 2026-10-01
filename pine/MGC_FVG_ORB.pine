@@ -356,7 +356,13 @@ bool windowStart = modo24 ? nuevoDia : (inSession and not inSession[1])
 //  Modo 24 h: 16:50 ET todos los días, lo que incluye el viernes, de modo que
 //  nunca queda posición abierta en el fin de semana.
 bool esViernes  = dayofweek(time, "America/New_York") == dayofweek.friday
-bool forceOut   = modo24 ? (nowMinNY >= 16 * 60 + 50) : (nowMin >= closeHr * 60)
+//  OJO con el intervalo: en modo 24 h el cierre forzoso solo debe estar activo
+//  entre las 16:50 y las 18:00 ET, no hasta medianoche. Si se deja abierto por
+//  arriba, la máscara veta las primeras seis horas del día CME (18:00-23:59),
+//  que es justo cuando abre el día de trading, y el "24 h" real se queda en
+//  00:00-16:45.
+bool forceOut   = modo24 ? (nowMinNY >= 16 * 60 + 50 and nowMinNY < 18 * 60)
+     : (nowMin >= closeHr * 60)
 bool forceViernes = modo24 and esViernes and nowMinNY >= 16 * 60 + 50
 
 float atr = ta.atr(i_atrLen)
@@ -1674,7 +1680,14 @@ f_planZona(Zona z) =>
     [entrada, stop, target, qty, riskPts]
 
 // Minutos hasta el cierre forzoso.
-int minsCierre = math.max(0, (modo24 ? (16 * 60 + 50) - nowMinNY : closeHr * 60 - nowMin))
+// Minutos hasta el cierre forzoso. Pasadas las 18:00 ET hay que contar hasta el
+// 16:50 del día siguiente, no devolver 0.
+int minsCierre = 0
+if modo24
+    int mm = (16 * 60 + 50) - nowMinNY
+    minsCierre := mm > 0 ? mm : mm + 24 * 60
+else
+    minsCierre := math.max(0, closeHr * 60 - nowMin)
 
 // Candidata: la zona de mejor score con tier >= MEDIA dentro del radio.
 int   candI = -1
