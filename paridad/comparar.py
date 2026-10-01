@@ -13,10 +13,15 @@ Entradas
 Formato de los registros de Pine
 --------------------------------
   Z,fecha,id,marco,dir,top,bot,mid,estado      alta de zona
+  S,fecha,id,marco,dir,top,bot,mid,estado      zona ya viva al abrir el rango
   E,fecha,id,estado_ant,estado_nuevo,dir_ant,dir_nuevo   cambio de estado
   D,fecha,id,disparador,dir,entrada,stop,stop_pts,objetivo   disparo
 
-El mismo formato se espera del lado de Python para las filas Z y E.
+Z y S se tratan igual: las dos dan de alta una zona. S existe porque el rango de
+exportación recorta los logs, y sin un inventario de las zonas que ya estaban
+vivas al abrirlo, el comparador las contaría como "solo en Python".
+
+El mismo formato se espera del lado de Python para las filas Z/S y E.
 
 Criterio para seguir con la calibración (V2.1 §1.2):
   - al menos el 95 % de zonas emparejadas
@@ -41,6 +46,12 @@ TOL_PRECIO = 0.3
 # Tolerancia de nacimiento, en minutos. Una zona de 4H puede registrarse con
 # algún desfase según cuándo cierre su vela en cada implementación.
 TOL_MINUTOS = 5
+# Tolerancia de la HORA de un cambio de estado. En el marco del gráfico el
+# cambio tiene que caer en la misma vela: cero margen. En marcos superiores se
+# admite una vela de 5m, porque el momento en que la implementación "ve" la
+# vela superior cerrada puede diferir en un paso.
+TOL_CAMBIO_5M = 0
+TOL_CAMBIO_HTF = 5
 UMBRAL_EMPAREJADAS = 0.95
 
 
@@ -53,7 +64,12 @@ class Zona:
     top: float
     bot: float
     mid: float
-    estados: list[tuple[datetime, int, int]] = field(default_factory=list)
+    # (fecha, estado_ant, estado_nuevo, dir_ant, dir_nuevo)
+    estados: list[tuple[datetime, int, int, int, int]] = field(default_factory=list)
+
+    @property
+    def es_htf(self) -> bool:
+        return self.marco.upper() not in ("5M", "5")
 
     def clave(self) -> tuple:
         return (self.marco, self.direccion)
@@ -76,14 +92,16 @@ def leer(path: Path) -> dict[str, Zona]:
             tipo = None
             off = 0
             for k in (0, 1):
-                if k < len(fila) and fila[k] in ("Z", "E", "D"):
+                if k < len(fila) and fila[k] in ("Z", "S", "E", "D"):
                     tipo, off = fila[k], k
                     break
             if tipo is None:
                 continue
             campos = fila[off:]
             try:
-                if tipo == "Z" and len(campos) >= 8:
+                # Z y S dan de alta una zona; si llegan las dos para el mismo
+                # id, gana la primera y la segunda no sobrescribe el historial.
+                if tipo in ("Z", "S") and len(campos) >= 8:
                     z = Zona(
                         fecha=_parse_fecha(campos[1]),
                         zid=campos[2],
@@ -93,12 +111,16 @@ def leer(path: Path) -> dict[str, Zona]:
                         bot=float(campos[6]),
                         mid=float(campos[7]),
                     )
-                    zonas[z.zid] = z
+                    if z.zid not in zonas:
+                        zonas[z.zid] = z
                 elif tipo == "E" and len(campos) >= 5:
                     zid = campos[2]
                     if zid in zonas:
+                        # dir_ant/dir_nuevo pueden faltar en registros antiguos
+                        da = int(campos[5]) if len(campos) > 5 else 0
+                        dn = int(campos[6]) if len(campos) > 6 else 0
                         zonas[zid].estados.append(
-                            (_parse_fecha(campos[1]), int(campos[3]), int(campos[4]))
+                            (_parse_fecha(campos[1]), int(campos[3]), int(campos[4]), da, dn)
                         )
             except (ValueError, IndexError):
                 print(f"  aviso: fila ilegible y omitida: {fila}", file=sys.stderr)
@@ -169,17 +191,36 @@ def main() -> None:
             print(f"   {z.fecha:%Y-%m-%d %H:%M}  {z.marco:>3} dir={z.direccion:+d}"
                   f"  {z.bot:.2f}-{z.top:.2f}")
 
-    # Discrepancias de estado entre zonas que sí se emparejaron.
-    discrepan = []
+    # Discrepancias de estado entre zonas que sí se emparejaron. Se compara la
+    # secuencia completa: estado anterior y nuevo, dirección anterior y nueva, y
+    # la HORA del cambio con tolerancia según el marco.
+    discrepan: list[tuple[Zona, str]] = []
     for zp, zq in pares:
-        sp = [(e[1], e[2]) for e in sorted(zp.estados)]
-        sq = [(e[1], e[2]) for e in sorted(zq.estados)]
-        if sp != sq:
-            discrepan.append((zp, sp, sq))
+        tol = TOL_CAMBIO_HTF if zp.es_htf else TOL_CAMBIO_5M
+        sp = sorted(zp.estados)
+        sq = sorted(zq.estados)
+        if len(sp) != len(sq):
+            discrepan.append((zp, f"nº de cambios: pine={len(sp)} python={len(sq)}"))
+            continue
+        for ep, eq in zip(sp, sq):
+            dmin = abs((ep[0] - eq[0]).total_seconds()) / 60.0
+            if dmin > tol:
+                discrepan.append((zp,
+                    f"hora del cambio {ep[1]}->{ep[2]}: pine={ep[0]:%H:%M} "
+                    f"python={eq[0]:%H:%M} (desfase {dmin:.0f} min, tolerancia {tol})"))
+                break
+            if (ep[1], ep[2]) != (eq[1], eq[2]):
+                discrepan.append((zp,
+                    f"estado: pine {ep[1]}->{ep[2]} vs python {eq[1]}->{eq[2]}"))
+                break
+            if (ep[3], ep[4]) != (eq[3], eq[4]):
+                discrepan.append((zp,
+                    f"dirección: pine {ep[3]}->{ep[4]} vs python {eq[3]}->{eq[4]}"))
+                break
 
     print(f"\ndiscrepancias de estado en zonas emparejadas: {len(discrepan)}")
-    for zp, sp, sq in discrepan[:15]:
-        print(f"   {zp.fecha:%Y-%m-%d %H:%M} {zp.marco:>3}: pine={sp} python={sq}")
+    for zp, motivo in discrepan[:15]:
+        print(f"   {zp.fecha:%Y-%m-%d %H:%M} {zp.marco:>3}: {motivo}")
 
     ok = pct >= UMBRAL_EMPAREJADAS and not discrepan
     print("\n" + ("PARIDAD OK: se puede seguir con la calibración"
