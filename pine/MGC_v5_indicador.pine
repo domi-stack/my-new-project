@@ -1,0 +1,996 @@
+//@version=6
+// =============================================================================
+//  MGC · FVG + Estructura · v5.0 · INDICADOR
+// =============================================================================
+//  Para COMEX:MGC1! en 1m o 5m. Opera 24 h: no hay ventanas horarias, ni cupo
+//  diario, ni límite de pérdidas, ni bloqueos por noticias. La única puerta de
+//  una señal es su calidad: sesgo + score + R:R.
+//
+// -----------------------------------------------------------------------------
+//  CÓMO SE LEE EL GRÁFICO (tres niveles de atención, nada más)
+// -----------------------------------------------------------------------------
+//    ·  punto gris pequeño   VIGILAR  · hay zona cerca, no hagas nada
+//    ◆  marcador ámbar       ARMADO   · barrido o retest confirmado, líneas
+//                                       discontinuas con entrada, SL y TP
+//    ▲  flecha grande        DISPARO  · confirmado y con etiqueta de una línea
+//
+//  Si no hay flecha, no hay señal. Un score por debajo del umbral o un R:R que
+//  no llega NUNCA llegan a flecha: se quedan en ARMADO y se invalidan solos.
+//
+//  Colores fijos: verde = demanda/largos · rojo = oferta/cortos ·
+//  azul = VWAP y apertura · gris = neutro o invalidado.
+//
+// -----------------------------------------------------------------------------
+//  POR QUÉ CADA FILTRO EXISTE
+// -----------------------------------------------------------------------------
+//  · Sesgo: la versión anterior daba COMPRA con el precio bajo el VWAP, bajo la
+//    apertura y con los soportes roseados. El sesgo es ahora el componente de
+//    más peso del score (25 de 100), así que ir contra él cuesta un cuarto de
+//    la nota y obliga a ganarse el resto.
+//  · Chop: en rango y con volatilidad comprimida los barridos son ruido. No se
+//    prohíbe mirar (VIGILAR sigue), se prohíbe disparar.
+//  · R:R mínimo: sin recorrido hasta el primer nivel opuesto, acertar la
+//    dirección no paga. Si no hay TP1 calculable, no hay disparo.
+//  · Score mínimo: es la puerta que faltaba. Por debajo de 40 no se dispara
+//    jamás, ni con todo lo demás a favor.
+//
+// -----------------------------------------------------------------------------
+//  SIN REPINTADO
+// -----------------------------------------------------------------------------
+//  Todas las decisiones se toman con barstate.isconfirmed. request.security usa
+//  lookahead_off Y expresiones desplazadas [1], o sea que solo lee velas ya
+//  cerradas del marco superior. Cuesta una vela de marco superior de retardo y
+//  a cambio histórico y tiempo real coinciden.
+//
+//  El gatillo de 1m solo existe cuando el GRÁFICO es de 1m. Pedir 1m desde un
+//  gráfico de 5m devuelve únicamente la última vela de 1m contenida en la de
+//  5m, no la secuencia, así que un engulfing de 1m no se puede detectar desde
+//  5m. En 5m el gatillo es de 5m.
+// =============================================================================
+
+indicator("MGC · FVG + Estructura v5.0", shorttitle = "MGC v5.0", overlay = true,
+     max_lines_count = 500, max_boxes_count = 500, max_labels_count = 500)
+
+// =============================================================================
+//  1 · INPUTS
+// =============================================================================
+
+// --- Sesgo -------------------------------------------------------------------
+const string G_SES = "Sesgo"
+i_tfEstr   = input.timeframe("15", "Marco de la estructura", group = G_SES,
+     tooltip = "Marco en el que se clasifica HH/HL frente a LH/LL para el tercer voto del sesgo.")
+i_pivL     = input.int(5, "Pivote izquierda", minval = 1, group = G_SES)
+i_pivR     = input.int(5, "Pivote derecha",   minval = 1, group = G_SES,
+     tooltip = "El pivote confirma este número de velas después de formarse. Ese retardo es lo que hace que la estructura no repinte.")
+
+// --- Señales -----------------------------------------------------------------
+const string G_SIG = "Señales"
+i_umbral     = input.int(65, "Score mínimo a favor del sesgo",  minval = 40, maxval = 100, group = G_SIG)
+i_umbralCtr  = input.int(75, "Score mínimo contra el sesgo",    minval = 40, maxval = 100, group = G_SIG,
+     tooltip = "Debe quedar por encima del umbral a favor. Ir contra el sesgo ya cuesta 25 puntos de score, así que este umbral exige " +
+               "además que casi todo lo demás esté a favor.")
+i_rrMin      = input.float(1.5, "R:R mínimo hasta TP1", minval = 0.5, step = 0.25, group = G_SIG,
+     tooltip = "Sin recorrido hasta el primer nivel opuesto, acertar la dirección no paga. Si no hay TP1 calculable, no hay disparo.")
+i_velasInval = input.int(12, "Velas sin disparar hasta invalidar", minval = 2, maxval = 100, group = G_SIG)
+i_velasBarr  = input.int(6, "Memoria del barrido (velas)", minval = 1, maxval = 30, group = G_SIG)
+i_chopPct    = input.int(30, "Percentil de ATR para chop", minval = 5, maxval = 60, group = G_SIG,
+     tooltip = "Si el ATR(14) de 5m está por debajo de este percentil de las últimas 20 sesiones, no se dispara. En rango y con " +
+               "volatilidad comprimida los barridos son ruido.")
+i_chopSes    = input.int(20, "Sesiones para el percentil", minval = 5, maxval = 60, group = G_SIG)
+
+// --- Score -------------------------------------------------------------------
+//  PESOS A PRIORI. Suman 100 y están razonados, pero no medidos. NO los
+//  optimices: son siete grados de libertad y cualquier combinación encuentra
+//  oro en una muestra pequeña. Lo que sí tiene sentido optimizar son los dos
+//  umbrales y el R:R mínimo. El panel de calibración está para describir dónde
+//  funciona, no para ajustar estos números.
+const string G_SCR = "Score"
+w_sesgo   = input.int(25, "Peso · alineación con el sesgo",      minval = 0, maxval = 60, group = G_SCR)
+w_zona    = input.int(20, "Peso · calidad de la zona",           minval = 0, maxval = 60, group = G_SCR)
+w_barrido = input.int(15, "Peso · barrido de liquidez",          minval = 0, maxval = 60, group = G_SCR)
+w_despl   = input.int(15, "Peso · fuerza del desplazamiento",    minval = 0, maxval = 60, group = G_SCR)
+w_vol     = input.int(10, "Peso · volumen relativo del gatillo", minval = 0, maxval = 60, group = G_SCR)
+w_rr      = input.int(15, "Peso · R:R disponible",               minval = 0, maxval = 60, group = G_SCR)
+w_penExt  = input.int(20, "Penalización máxima por extensión",   minval = 0, maxval = 60, group = G_SCR,
+     tooltip = "Solo contra tendencia: la mitad si la distancia al VWAP pasa de 2 ATR, entera si pasa de 3.")
+
+// --- Niveles -----------------------------------------------------------------
+const string G_NIV = "Niveles"
+i_nivLado  = input.int(2, "Niveles visibles por lado", minval = 1, maxval = 4, group = G_NIV,
+     tooltip = "Menos es más: con cuatro niveles en pantalla se lee el contexto de un vistazo; con veinte no se lee nada.")
+i_pasoRed  = input.float(25.0, "Paso de números redondos ($)", minval = 5, step = 5, group = G_NIV)
+i_atrLen   = input.int(14, "Periodo del ATR", minval = 2, group = G_NIV)
+i_fvgMin   = input.float(0.5, "Anchura mínima del FVG (x ATR)", minval = 0.0, step = 0.1, group = G_NIV)
+i_tolConf  = input.float(0.3, "Tolerancia de confluencia (x ATR)", minval = 0.05, step = 0.05, group = G_NIV)
+
+// --- Visual ------------------------------------------------------------------
+const string G_VIS = "Visual"
+i_minimal  = input.bool(false, "Modo Minimal", group = G_VIS,
+     tooltip = "Deja solo el panel, el nivel más cercano arriba y abajo, y la señal activa. Todo lo demás se oculta.")
+i_verCajas = input.bool(true, "Cajas de riesgo y beneficio", group = G_VIS)
+i_transp   = input.int(85, "Transparencia de las cajas", minval = 70, maxval = 95, group = G_VIS,
+     tooltip = "Nunca por debajo de 70: las velas tienen que verse siempre.")
+i_verPanel = input.bool(true, "Mostrar panel", group = G_VIS)
+i_verCalib = input.bool(true, "Mostrar calibración en el panel", group = G_VIS)
+
+// --- Riesgo ------------------------------------------------------------------
+const string G_RSK = "Riesgo"
+i_riesgo   = input.float(150.0, "Riesgo por operación ($)", minval = 1, group = G_RSK,
+     tooltip = "Solo informativo: el panel muestra los contratos MGC que saldrían. NUNCA bloquea una señal.")
+i_puntoUSD = input.float(10.0, "USD por punto y contrato", minval = 0.01, group = G_RSK)
+i_basis    = input.float(0.0, "Base futuros − spot (pts)", step = 0.1, group = G_RSK,
+     tooltip = "Si el gráfico es spot (XAUUSD), el panel muestra además los precios equivalentes de MGC sumando esta base.")
+i_autoOff  = input.bool(false, "Desactivar setups con esperanza negativa", group = G_RSK,
+     tooltip = "Apagado por defecto. Con al menos 30 disparos registrados de un tipo y esperanza menor que cero, deja de señalarlo. " +
+               "Actívalo solo cuando el panel tenga muestra de verdad.")
+
+// =============================================================================
+//  2 · MARCO, INSTRUMENTO Y SERIES BASE
+// =============================================================================
+
+bool   esM1    = timeframe.period == "1"
+bool   esM5    = timeframe.period == "5"
+bool   tfOk    = esM1 or esM5
+string tfSetup = "5"
+
+// Spot o futuros: cambia el tratamiento del volumen y activa la conversión.
+bool esSpot = not (str.startswith(syminfo.ticker, "MGC") or str.startswith(syminfo.ticker, "GC"))
+
+float atr5 = request.security(syminfo.tickerid, tfSetup, ta.atr(i_atrLen)[1],
+     lookahead = barmerge.lookahead_off)
+float atr   = nz(atr5, ta.atr(i_atrLen))
+bool  conf  = barstate.isconfirmed
+
+// VWAP de sesión y apertura diaria: los dos votos de contexto del sesgo.
+float vwapSes = ta.vwap(hlc3)
+float aperDia = request.security(syminfo.tickerid, "1D", open, lookahead = barmerge.lookahead_off)
+[pdh, pdl]    = request.security(syminfo.tickerid, "1D", [high[1], low[1]],
+     lookahead = barmerge.lookahead_off)
+
+// =============================================================================
+//  3 · PERCENTIL DE ATR POR SESIÓN · filtro de chop
+// =============================================================================
+//  Se guarda el ATR medio de cada sesión en una cola y se compara el de hoy con
+//  el percentil de las últimas N. Medido sobre el propio gráfico: una tabla de
+//  umbrales de volatilidad sería un nivel hardcodeado y además el régimen
+//  cambia.
+var array<float> atrSes = array.new_float()
+var float atrSum = 0.0
+var int   atrN   = 0
+bool nuevoDiaCal = ta.change(time("1D")) != 0
+
+if nuevoDiaCal and atrN > 0
+    array.push(atrSes, atrSum / atrN)
+    while array.size(atrSes) > i_chopSes
+        array.shift(atrSes)
+    atrSum := 0.0
+    atrN   := 0
+if not na(atr)
+    atrSum += atr
+    atrN   += 1
+
+f_percentil(array<float> a, int pct) =>
+    float r = na
+    if array.size(a) >= 5
+        array<float> c = array.copy(a)
+        array.sort(c, order.ascending)
+        int idx = math.min(array.size(c) - 1,
+             math.max(0, int(math.round(pct / 100.0 * (array.size(c) - 1)))))
+        r := array.get(c, idx)
+    r
+
+float atrP = f_percentil(atrSes, i_chopPct)
+
+// Rango activo: el precio vive dentro del rango de las últimas 20 velas de
+// estructura y ese rango es estrecho comparado con el ATR.
+float rangoHi = ta.highest(high, 20)
+float rangoLo = ta.lowest(low, 20)
+bool enRango  = (rangoHi - rangoLo) < 3.0 * nz(atr, 0) and close < rangoHi and close > rangoLo
+bool esChop   = (not na(atrP) and nz(atr, 0) < atrP) or enRango
+
+// =============================================================================
+//  4 · SESGO · tres votos
+// =============================================================================
+//  Precio contra VWAP, precio contra apertura diaria y estructura del marco
+//  elegido. Dos votos en la misma dirección mandan; si no, NEUTRO. Tres votos
+//  en lugar de uno porque cualquiera de ellos por separado se equivoca a
+//  menudo, y la queja de partida era exactamente una señal que ignoraba dos.
+
+f_estructura(int pl, int pr, bool shift) =>
+    float ph = ta.pivothigh(pl, pr)
+    float pv = ta.pivotlow(pl, pr)
+    var float sh1 = na
+    var float sh2 = na
+    var float sl1 = na
+    var float sl2 = na
+    if not na(ph)
+        sh2 := sh1
+        sh1 := ph
+    if not na(pv)
+        sl2 := sl1
+        sl1 := pv
+    int b = 0
+    if not na(sh1) and not na(sh2) and not na(sl1) and not na(sl2)
+        if sh1 > sh2 and sl1 > sl2
+            b := 1
+        else if sh1 < sh2 and sl1 < sl2
+            b := -1
+    [shift ? nz(b[1], 0) : b, shift ? sh1[1] : sh1, shift ? sl1[1] : sl1]
+
+[bEstrRaw, swHiE, swLoE] = request.security(syminfo.tickerid, i_tfEstr,
+     f_estructura(i_pivL, i_pivR, true), lookahead = barmerge.lookahead_off)
+int bEstr = nz(bEstrRaw)
+
+// Estructura y CHoCH en el marco de setup, para el requisito de contra tendencia.
+[bSetup, swHi, swLo] = f_estructura(i_pivL, i_pivR, false)
+
+var int   tendLoc = 0
+var float rotoHi  = na
+var float rotoLo  = na
+bool chochUp = false
+bool chochDn = false
+if conf
+    bool rompeArr = not na(swHi) and close > swHi and (na(rotoHi) or swHi != rotoHi)
+    bool rompeAba = not na(swLo) and close < swLo and (na(rotoLo) or swLo != rotoLo)
+    if rompeArr
+        chochUp := tendLoc == -1
+        tendLoc := 1
+        rotoHi  := swHi
+    else if rompeAba
+        chochDn := tendLoc == 1
+        tendLoc := -1
+        rotoLo  := swLo
+
+int votos = (close > vwapSes ? 1 : close < vwapSes ? -1 : 0) +
+     (na(aperDia) ? 0 : close > aperDia ? 1 : close < aperDia ? -1 : 0) + bEstr
+int sesgo = votos >= 2 ? 1 : votos <= -2 ? -1 : 0
+string sesgoTxt = sesgo == 1 ? "ALCISTA" : sesgo == -1 ? "BAJISTA" : "NEUTRO"
+color  sesgoCol = sesgo == 1 ? color.new(color.green, 0) :
+     sesgo == -1 ? color.new(color.red, 0) : color.new(color.gray, 0)
+
+// =============================================================================
+//  5 · SESIÓN ACTUAL · solo informativo
+// =============================================================================
+//  No filtra nada. Está para que la calibración pueda decir DÓNDE funciona.
+bool enAsia = not na(time(timeframe.period, "2000-2359", "America/New_York")) or
+     not na(time(timeframe.period, "0000-0200", "America/New_York"))
+bool enLon  = not na(time(timeframe.period, "0200-0800", "America/New_York"))
+bool enNY   = not na(time(timeframe.period, "0800-1700", "America/New_York"))
+int  sesIdx = enNY ? 2 : enLon ? 1 : enAsia ? 0 : 3
+string sesTxt = sesIdx == 2 ? "NY" : sesIdx == 1 ? "Londres" : sesIdx == 0 ? "Asia" : "—"
+
+// =============================================================================
+//  6 · ZONAS FVG en 15m, 1H y diario
+// =============================================================================
+type Zona
+    float  top
+    float  bot
+    float  mid
+    int    dir        //  1 demanda · -1 oferta
+    string tf         // "15m" / "1H" / "D"
+    int    peso       // 4 / 7 / 10 según marco, para el score
+    bool   viva
+    box    bx
+
+var array<Zona> zonas = array.new<Zona>()
+
+//  Imbalance de tres velas sobre velas YA CERRADAS del marco pedido, con
+//  anchura mínima medida contra el ATR de ese mismo marco.
+f_fvgHtf(int atrLen, float minMult) =>
+    float a = ta.atr(atrLen)[1]
+    bool  bu = low[1]  > high[3] and (low[1] - high[3]) >= minMult * a
+    bool  be = high[1] < low[3]  and (low[3] - high[1]) >= minMult * a
+    [time, bu, low[1], high[3], be, low[3], high[1]]
+
+[t15, bu15, bu15T, bu15B, be15, be15T, be15B] = request.security(syminfo.tickerid, "15",
+     f_fvgHtf(i_atrLen, i_fvgMin), lookahead = barmerge.lookahead_off)
+[t60, bu60, bu60T, bu60B, be60, be60T, be60B] = request.security(syminfo.tickerid, "60",
+     f_fvgHtf(i_atrLen, i_fvgMin), lookahead = barmerge.lookahead_off)
+[tD,  buD,  buDT,  buDB,  beD,  beDT,  beDB]  = request.security(syminfo.tickerid, "1D",
+     f_fvgHtf(i_atrLen, i_fvgMin), lookahead = barmerge.lookahead_off)
+
+//  Las series con estado interno se calculan SIEMPRE en ámbito global: meter un
+//  ta.change o un ta.sma dentro de un bloque condicional lo evalúa de forma
+//  intermitente y su historial sale mal. Es un fallo que no da error de
+//  compilación, solo resultados silenciosamente equivocados.
+bool nuevo15 = not na(t15) and ta.change(t15) != 0
+bool nuevo60 = not na(t60) and ta.change(t60) != 0
+bool nuevoDd = not na(tD)  and ta.change(tD)  != 0
+float volSma = ta.sma(volume, 20)
+
+f_addZona(float top, float bot, int dir, string tf, int peso) =>
+    Zona z = Zona.new(top = top, bot = bot, mid = (top + bot) / 2.0, dir = dir,
+         tf = tf, peso = peso, viva = true, bx = na)
+    color c = dir == 1 ? color.green : color.red
+    z.bx := box.new(bar_index, top, bar_index + 1, bot,
+         border_color = color.new(c, 55), bgcolor = color.new(c, i_transp),
+         border_width = 1, text = "", text_size = size.tiny)
+    array.push(zonas, z)
+    while array.size(zonas) > 40
+        Zona vieja = array.shift(zonas)
+        if not na(vieja.bx)
+            box.delete(vieja.bx)
+
+if conf and not na(atr)
+    if nuevo15
+        if bu15
+            f_addZona(bu15T, bu15B, 1, "15m", 4)
+        if be15
+            f_addZona(be15T, be15B, -1, "15m", 4)
+    if nuevo60
+        if bu60
+            f_addZona(bu60T, bu60B, 1, "1H", 7)
+        if be60
+            f_addZona(be60T, be60B, -1, "1H", 7)
+    if nuevoDd
+        if buD
+            f_addZona(buDT, buDB, 1, "D", 10)
+        if beD
+            f_addZona(beDT, beDB, -1, "D", 10)
+
+//  Una zona muere cuando el precio la atraviesa por completo: mantenerla
+//  dibujada después es exactamente la saturación que había que quitar.
+if conf and array.size(zonas) > 0
+    for i = 0 to array.size(zonas) - 1
+        Zona z = array.get(zonas, i)
+        if z.viva
+            bool muerta = z.dir == 1 ? close < z.bot : close > z.top
+            if muerta
+                z.viva := false
+                if not na(z.bx)
+                    box.delete(z.bx)
+                    z.bx := na
+            else if not na(z.bx)
+                box.set_right(z.bx, bar_index + 1)
+        array.set(zonas, i, z)
+
+// =============================================================================
+//  7 · INVENTARIO DE NIVELES · solo los 2 más cercanos por lado
+// =============================================================================
+type Nivel
+    float  precio
+    string nombre
+    int    clase      //  1 soporte · -1 resistencia · 0 neutro
+    bool   reconv     // soporte roto reconvertido en resistencia o al revés
+
+f_nivelesCandidatos() =>
+    array<Nivel> a = array.new<Nivel>()
+    if not na(vwapSes)
+        array.push(a, Nivel.new(vwapSes, "VWAP", 0, false))
+    if not na(aperDia)
+        array.push(a, Nivel.new(aperDia, "Apertura", 0, false))
+    if not na(pdh)
+        array.push(a, Nivel.new(pdh, "PDH", -1, false))
+    if not na(pdl)
+        array.push(a, Nivel.new(pdl, "PDL", 1, false))
+    if i_pasoRed > 0
+        float base = math.floor(close / i_pasoRed) * i_pasoRed
+        array.push(a, Nivel.new(base, str.tostring(base, "#"), 0, false))
+        array.push(a, Nivel.new(base + i_pasoRed, str.tostring(base + i_pasoRed, "#"), 0, false))
+    if array.size(zonas) > 0
+        for i = 0 to array.size(zonas) - 1
+            Zona z = array.get(zonas, i)
+            if z.viva
+                array.push(a, Nivel.new(z.mid, z.tf + " FVG", z.dir, false))
+    a
+
+//  Pool fijo de líneas y etiquetas: se crean una vez y se mueven. Nada de
+//  crear y borrar en cada vela.
+var array<line>  lnPool = array.new<line>()
+var array<label> lbPool = array.new<label>()
+if barstate.isfirst
+    for k = 0 to 7
+        array.push(lnPool, line.new(bar_index, close, bar_index, close,
+             color = color.new(color.gray, 100), width = 1,
+             extend = extend.none, style = line.style_dotted))
+        array.push(lbPool, label.new(bar_index, close, "", style = label.style_label_left,
+             color = color.new(color.gray, 100), textcolor = color.new(color.gray, 100),
+             size = size.small))
+
+float nivArriba = na
+float nivAbajo  = na
+string nomArriba = ""
+string nomAbajo  = ""
+
+if barstate.islast
+    array<Nivel> cand = f_nivelesCandidatos()
+    int cupo = i_minimal ? 1 : i_nivLado
+    int slot = 0
+
+    // Dos pasadas: los `cupo` más cercanos por encima, y luego por debajo.
+    for lado = -1 to 1 by 2
+        array<float> usados = array.new_float()
+        for k = 1 to cupo
+            int   best = -1
+            float bd   = 1e12
+            if array.size(cand) > 0
+                for i = 0 to array.size(cand) - 1
+                    Nivel nv = array.get(cand, i)
+                    bool arriba = nv.precio > close
+                    if (lado == 1) == arriba and not array.includes(usados, nv.precio)
+                        float d = math.abs(nv.precio - close)
+                        if d < bd
+                            bd   := d
+                            best := i
+            if best >= 0
+                Nivel nv = array.get(cand, best)
+                array.push(usados, nv.precio)
+                if k == 1
+                    if lado == 1
+                        nivArriba  := nv.precio
+                        nomArriba  := nv.nombre
+                    else
+                        nivAbajo  := nv.precio
+                        nomAbajo  := nv.nombre
+                if slot < array.size(lnPool)
+                    // Azul para VWAP y apertura, verde soporte, rojo resistencia.
+                    color c = nv.nombre == "VWAP" or nv.nombre == "Apertura" ?
+                         color.new(color.blue, 30) :
+                         nv.clase == 1 ? color.new(color.green, 35) :
+                         nv.clase == -1 ? color.new(color.red, 35) : color.new(color.gray, 45)
+                    line ln = array.get(lnPool, slot)
+                    line.set_xy1(ln, bar_index - 40, nv.precio)
+                    line.set_xy2(ln, bar_index + 6,  nv.precio)
+                    line.set_color(ln, c)
+                    label lb = array.get(lbPool, slot)
+                    label.set_xy(lb, bar_index + 6, nv.precio)
+                    // Etiqueta de una a tres palabras, pegada a la escala.
+                    label.set_text(lb, nv.nombre + " " + str.tostring(nv.precio, format.mintick))
+                    label.set_textcolor(lb, c)
+                    slot += 1
+
+    // Lo que no se usa en esta vela se esconde, no se borra.
+    if slot < array.size(lnPool)
+        for k = slot to array.size(lnPool) - 1
+            line.set_color(array.get(lnPool, k), color.new(color.gray, 100))
+            label.set_text(array.get(lbPool, k), "")
+            label.set_textcolor(array.get(lbPool, k), color.new(color.gray, 100))
+
+// =============================================================================
+//  8 · BARRIDO DE LIQUIDEZ con recuperación
+// =============================================================================
+//  Mecha que supera un extremo y cierre de vuelta dentro. Es el "alguien ha
+//  cazado stops y no había continuación" que justifica buscar la vuelta.
+bool barrUp = conf and ((not na(pdl)  and low  < pdl  and close > pdl) or
+     (not na(swLo) and low  < swLo and close > swLo))
+bool barrDn = conf and ((not na(pdh)  and high > pdh  and close < pdh) or
+     (not na(swHi) and high > swHi and close < swHi))
+
+bool barrUpRec = nz(ta.barssince(barrUp), 999999) <= i_velasBarr
+bool barrDnRec = nz(ta.barssince(barrDn), 999999) <= i_velasBarr
+float mechaUp  = ta.valuewhen(barrUp, low,  0)
+float mechaDn  = ta.valuewhen(barrDn, high, 0)
+// Extremo opuesto de la vela del barrido: es el nivel cuya ruptura confirma.
+float barrUpHi = ta.valuewhen(barrUp, high, 0)
+float barrDnLo = ta.valuewhen(barrDn, low,  0)
+
+// =============================================================================
+//  9 · SCORE 0-100
+// =============================================================================
+//  Siete componentes. Ver la cabecera: los pesos son a priori, la alineación
+//  con el sesgo se lleva el trozo mayor porque ignorarla era el fallo de la
+//  versión anterior, y la penalización por extensión solo muerde contra
+//  tendencia, que es donde comprar caro duele.
+
+f_zonaCerca(int dir) =>
+    // Zona viva de la dirección pedida más cercana al precio, con su peso.
+    int    best = -1
+    float  bd   = 1e12
+    if array.size(zonas) > 0
+        for i = 0 to array.size(zonas) - 1
+            Zona z = array.get(zonas, i)
+            if z.viva and z.dir == dir
+                float d = math.abs(z.mid - close)
+                if d < bd
+                    bd   := d
+                    best := i
+    [best, bd]
+
+f_confluencias(float precio) =>
+    // Cuántos niveles de referencia hay a menos de la tolerancia. Tope de dos,
+    // porque la tercera confluencia ya no añade información.
+    float tol = i_tolConf * nz(atr, 0)
+    int   n   = 0
+    if tol > 0
+        if not na(pdh) and math.abs(precio - pdh) <= tol
+            n += 1
+        if not na(pdl) and math.abs(precio - pdl) <= tol
+            n += 1
+        if not na(vwapSes) and math.abs(precio - vwapSes) <= tol
+            n += 1
+        if not na(aperDia) and math.abs(precio - aperDia) <= tol
+            n += 1
+        if i_pasoRed > 0 and math.abs(precio - math.round(precio / i_pasoRed) * i_pasoRed) <= tol
+            n += 1
+    math.min(n, 2)
+
+f_score(int dir, float entrada, float sl, float tp1, int pesoZona, float precioZona) =>
+    int    s   = 0
+    string det = ""
+
+    // 1 · Alineación con el sesgo
+    int pS = sesgo == dir ? w_sesgo : sesgo == 0 ? int(w_sesgo * 0.4) : 0
+    s   += pS
+    det += "sesgo " + str.tostring(pS)
+
+    // 2 · Calidad de la zona: marco + confluencia
+    int pMarco = int(math.round(pesoZona / 10.0 * (w_zona * 0.5)))
+    int pConf  = f_confluencias(precioZona) * int(math.round(w_zona * 0.25))
+    s   += pMarco + pConf
+    det += " · zona " + str.tostring(pMarco + pConf)
+
+    // 3 · Barrido de liquidez presente
+    int pB = (dir == 1 ? barrUpRec : barrDnRec) ? w_barrido : 0
+    s   += pB
+    det += " · barrido " + str.tostring(pB)
+
+    // 4 · Fuerza del desplazamiento: cuerpo contra ATR
+    float cuerpo = math.abs(close - open) / math.max(nz(atr, 1), 0.01)
+    int pD = cuerpo >= 1.5 ? w_despl : cuerpo >= 1.0 ? int(w_despl * 0.67) :
+         cuerpo >= 0.6 ? int(w_despl * 0.33) : 0
+    s   += pD
+    det += " · despl " + str.tostring(pD)
+
+    // 5 · Volumen relativo. En spot el volumen es cuenta de ticks y no es
+    //     comparable, así que puntúa neutro en vez de cero: penalizar por un
+    //     dato que no existe sería inventar.
+    int pV = 0
+    if esSpot
+        pV := int(math.round(w_vol * 0.6))
+    else
+        float vr = nz(volume) / math.max(nz(volSma), 1)
+        pV := vr >= 1.5 ? w_vol : vr >= 1.0 ? int(w_vol * 0.6) : 0
+    s   += pV
+    det += " · vol " + str.tostring(pV)
+
+    // 6 · R:R disponible hasta TP1
+    float riesgo = math.abs(entrada - sl)
+    float rr = riesgo > 0 and not na(tp1) ? math.abs(tp1 - entrada) / riesgo : na
+    int pR = na(rr) ? 0 : rr >= 2.5 ? w_rr : rr >= 2.0 ? int(w_rr * 0.8) :
+         rr >= 1.5 ? int(w_rr * 0.53) : 0
+    s   += pR
+    det += " · R:R " + str.tostring(pR)
+
+    // 7 · Penalización por extensión, solo contra el sesgo
+    int pen = 0
+    if sesgo != 0 and sesgo != dir and not na(vwapSes) and nz(atr, 0) > 0
+        float dv = math.abs(close - vwapSes) / atr
+        pen := dv > 3.0 ? w_penExt : dv > 2.0 ? int(w_penExt * 0.5) : 0
+    s   -= pen
+    if pen > 0
+        det += " · extensión -" + str.tostring(pen)
+
+    [math.max(0, math.min(100, s)), det, rr]
+
+f_etiqScore(int s) => s >= 65 ? "fuerte" : s >= 40 ? "media" : "débil"
+f_colScore(int s)  => s >= 65 ? color.new(color.green, 0) :
+     s >= 40 ? color.new(color.orange, 0) : color.new(color.gray, 20)
+
+// =============================================================================
+//  10 · MÁQUINA DE ESTADOS
+// =============================================================================
+//  VIGILAR → ARMADO → DISPARO, con INVALIDADO como salida en cualquier punto.
+//  Un setup por dirección: uno nuevo en la misma dirección sustituye al
+//  anterior, porque dos ideas simultáneas en el mismo sentido no se pueden
+//  gestionar y solo ensucian.
+
+type Setup
+    int    dir
+    int    estado     // 1 vigilar · 2 armado · 3 disparo · 4 invalidado
+    float  entrada
+    float  sl
+    float  tp1
+    float  tp2
+    float  rr
+    int    score
+    string detalle
+    int    barArmado
+    int    barDisparo
+    bool   contra
+    int    sesion
+    line   lnE
+    line   lnS
+    line   lnT
+    box    bxR
+    box    bxB
+    label  lbSig
+
+var Setup sL = na
+var Setup sS = na
+
+f_borrarDibujos(Setup s) =>
+    if not na(s)
+        if not na(s.lnE)
+            line.delete(s.lnE)
+        if not na(s.lnS)
+            line.delete(s.lnS)
+        if not na(s.lnT)
+            line.delete(s.lnT)
+        if not na(s.bxR)
+            box.delete(s.bxR)
+        if not na(s.bxB)
+            box.delete(s.bxB)
+        if not na(s.lbSig)
+            label.delete(s.lbSig)
+
+//  TP1 = siguiente nivel de liquidez opuesto. TP2 = siguiente zona HTF más
+//  allá. Si no hay TP1, no hay R:R y el setup no puede disparar: eso es
+//  deliberado, no un hueco.
+f_objetivos(int dir, float entrada) =>
+    float t1 = na
+    float t2 = na
+    array<Nivel> cand = f_nivelesCandidatos()
+    if array.size(cand) > 0
+        float b1 = 1e12
+        for i = 0 to array.size(cand) - 1
+            Nivel nv = array.get(cand, i)
+            bool delante = dir == 1 ? nv.precio > entrada : nv.precio < entrada
+            if delante
+                float d = math.abs(nv.precio - entrada)
+                if d < b1 and d > 0.5 * nz(atr, 0)
+                    b1 := d
+                    t1 := nv.precio
+    if array.size(zonas) > 0 and not na(t1)
+        float b2 = 1e12
+        for i = 0 to array.size(zonas) - 1
+            Zona z = array.get(zonas, i)
+            if z.viva and z.dir == -dir
+                bool masAlla = dir == 1 ? z.mid > t1 : z.mid < t1
+                if masAlla
+                    float d = math.abs(z.mid - t1)
+                    if d < b2
+                        b2 := d
+                        t2 := z.mid
+    [t1, t2]
+
+// --- Calibración: registro de disparos y su resultado ------------------------
+var array<float> calR     = array.new_float()
+var array<int>   calDir   = array.new_int()
+var array<int>   calCtr   = array.new_int()
+var array<int>   calSes   = array.new_int()
+
+f_expectativa(int dir, int ctr, int ses) =>
+    // Esperanza en R de los disparos que casan con el filtro pedido. -1 en
+    // cualquier campo significa "no filtrar por eso".
+    float s = 0.0
+    int   n = 0
+    if array.size(calR) > 0
+        for i = 0 to array.size(calR) - 1
+            bool ok = (dir == -1 or array.get(calDir, i) == dir) and
+                 (ctr == -1 or array.get(calCtr, i) == ctr) and
+                 (ses == -1 or array.get(calSes, i) == ses)
+            if ok
+                s += array.get(calR, i)
+                n += 1
+    [n > 0 ? s / n : na, n]
+
+// --- Transiciones ------------------------------------------------------------
+bool nuevoArmadoL = false
+bool nuevoArmadoS = false
+bool disparoL     = false
+bool disparoS     = false
+
+if conf and tfOk and not na(atr)
+    for dir = -1 to 1 by 2
+        bool esL = dir == 1
+        Setup act = esL ? sL : sS
+
+        // --- INVALIDADO: cierre más allá del SL, o demasiadas velas esperando
+        if not na(act) and act.estado == 2
+            bool fueraSl = esL ? close < act.sl : close > act.sl
+            bool caduco  = bar_index - act.barArmado > i_velasInval
+            if fueraSl or caduco
+                f_borrarDibujos(act)
+                act := na
+                if esL
+                    sL := na
+                else
+                    sS := na
+
+        // --- ARMADO: barrido con recuperación en la dirección pedida
+        bool hayBarrido = esL ? barrUpRec : barrDnRec
+        float mecha     = esL ? mechaUp : mechaDn
+        [zi, zd] = f_zonaCerca(dir)
+        bool zonaCerca = zi >= 0 and zd <= 0.5 * atr
+
+        if hayBarrido and not na(mecha) and zonaCerca
+            float entrada = close
+            float sl      = esL ? mecha - 0.15 * atr : mecha + 0.15 * atr
+            [t1, t2] = f_objetivos(dir, entrada)
+            Zona zc = array.get(zonas, zi)
+            [sc, det, rr] = f_score(dir, entrada, sl, t1, zc.peso, zc.mid)
+
+            // Contra tendencia solo con las tres condiciones de la especificación.
+            bool contra = sesgo != 0 and sesgo != dir
+            bool ctrOk  = (not contra) or (zonaCerca and hayBarrido and (esL ? chochUp : chochDn))
+
+            if ctrOk
+                // Sustituye al anterior de la misma dirección.
+                if not na(act)
+                    f_borrarDibujos(act)
+                Setup ns = Setup.new(dir = dir, estado = 2, entrada = entrada, sl = sl,
+                     tp1 = t1, tp2 = t2, rr = rr, score = sc, detalle = det,
+                     barArmado = bar_index, barDisparo = -1, contra = contra,
+                     sesion = sesIdx, lnE = na, lnS = na, lnT = na, bxR = na, bxB = na,
+                     lbSig = na)
+                color c = esL ? color.green : color.red
+                ns.lnE := line.new(bar_index, entrada, bar_index + 10, entrada,
+                     color = color.new(color.gray, 20), style = line.style_dashed, width = 1)
+                ns.lnS := line.new(bar_index, sl, bar_index + 10, sl,
+                     color = color.new(color.red, 20), style = line.style_dashed, width = 1)
+                if not na(t1)
+                    ns.lnT := line.new(bar_index, t1, bar_index + 10, t1,
+                         color = color.new(color.green, 20), style = line.style_dashed, width = 1)
+                if esL
+                    sL := ns
+                    nuevoArmadoL := true
+                else
+                    sS := ns
+                    nuevoArmadoS := true
+                act := ns
+
+        // --- DISPARO: confirmación + score + R:R, las tres cosas
+        if not na(act) and act.estado == 2
+            // Confirmación: engulfing o ruptura del extremo de la vela del barrido.
+            bool engulf = esL ? (close > open and close > high[1]) :
+                 (close < open and close < low[1])
+            bool rompe  = esL ? (not na(barrUpHi) and close > barrUpHi) :
+                 (not na(barrDnLo) and close < barrDnLo)
+            bool confirma = engulf or rompe
+
+            int umbral = act.contra ? i_umbralCtr : i_umbral
+            bool okScore = act.score >= umbral and act.score >= 40
+            bool okRR    = not na(act.rr) and act.rr >= i_rrMin
+
+            // El filtro de chop no impide VIGILAR ni ARMADO, solo DISPARAR.
+            bool okChop = not esChop
+
+            // Desactivación automática por esperanza negativa, si se activó.
+            bool okAuto = true
+            if i_autoOff
+                [e, n] = f_expectativa(dir, act.contra ? 1 : 0, -1)
+                okAuto := not (n >= 30 and not na(e) and e < 0)
+
+            if confirma and okScore and okRR and okChop and okAuto
+                act.estado     := 3
+                act.barDisparo := bar_index
+                // Cajas tipo herramienta de posición.
+                if i_verCajas and not i_minimal
+                    act.bxR := box.new(bar_index, act.entrada, bar_index + 12, act.sl,
+                         border_color = color.new(color.red, 60),
+                         bgcolor = color.new(color.red, i_transp))
+                    if not na(act.tp1)
+                        act.bxB := box.new(bar_index, act.entrada, bar_index + 12, act.tp1,
+                             border_color = color.new(color.green, 60),
+                             bgcolor = color.new(color.green, i_transp))
+                // Etiqueta de UNA línea, que es lo que hay que leer de un vistazo.
+                string txt = (esL ? "LONG " : "SHORT ") +
+                     str.tostring(act.entrada, format.mintick) +
+                     " | SL " + str.tostring(act.sl, format.mintick) +
+                     (na(act.tp1) ? "" : " | TP1 " + str.tostring(act.tp1, format.mintick)) +
+                     " | " + str.tostring(act.rr, "#.#") + "R"
+                act.lbSig := label.new(bar_index, esL ? low - 0.8 * atr : high + 0.8 * atr,
+                     txt, style = esL ? label.style_label_up : label.style_label_down,
+                     color = esL ? color.new(color.green, 0) : color.new(color.red, 0),
+                     textcolor = color.white, size = size.normal)
+                if esL
+                    sL := act
+                    disparoL := true
+                else
+                    sS := act
+                    disparoS := true
+
+        // --- Resultado del disparo, para la calibración
+        if not na(act) and act.estado == 3
+            bool toco1 = not na(act.tp1) and (esL ? high >= act.tp1 : low <= act.tp1)
+            bool tocoS = esL ? low <= act.sl : high >= act.sl
+            bool caduc = bar_index - act.barDisparo > i_velasInval * 3
+            if toco1 or tocoS or caduc
+                float r = tocoS ? -1.0 : toco1 ? math.abs(act.tp1 - act.entrada) /
+                     math.max(math.abs(act.entrada - act.sl), 0.01) : 0.0
+                array.push(calR,   r)
+                array.push(calDir, dir)
+                array.push(calCtr, act.contra ? 1 : 0)
+                array.push(calSes, act.sesion)
+                while array.size(calR) > 100
+                    array.shift(calR)
+                    array.shift(calDir)
+                    array.shift(calCtr)
+                    array.shift(calSes)
+                f_borrarDibujos(act)
+                if esL
+                    sL := na
+                else
+                    sS := na
+
+// =============================================================================
+//  11 · MARCADORES · tres niveles de atención y nada más
+// =============================================================================
+Setup vivo = na
+if not na(sL) and not na(sS)
+    vivo := sL.estado >= sS.estado ? sL : sS
+else if not na(sL)
+    vivo := sL
+else if not na(sS)
+    vivo := sS
+
+bool hayVigilar = false
+int  vigDir = 0
+if na(vivo) and not na(atr)
+    [ziL, zdL] = f_zonaCerca(1)
+    [ziS, zdS] = f_zonaCerca(-1)
+    if ziL >= 0 and zdL <= 0.5 * atr
+        hayVigilar := true
+        vigDir := 1
+    else if ziS >= 0 and zdS <= 0.5 * atr
+        hayVigilar := true
+        vigDir := -1
+
+//  El punto de VIGILAR se tiñe por dirección: gris verdoso si la zona cercana
+//  es de demanda, rojizo si es de oferta. Sigue siendo un punto pequeño.
+plotshape(hayVigilar and not i_minimal, "VIGILAR", shape.circle, location.belowbar,
+     color = vigDir == 1 ? color.new(color.green, 55) : color.new(color.red, 55),
+     size = size.tiny)
+plotshape(nuevoArmadoL, "ARMADO largo",  shape.diamond, location.belowbar,
+     color.new(color.orange, 0), size = size.tiny)
+plotshape(nuevoArmadoS, "ARMADO corto",  shape.diamond, location.abovebar,
+     color.new(color.orange, 0), size = size.tiny)
+plotshape(disparoL, "DISPARO largo",  shape.triangleup,   location.belowbar,
+     color.new(color.green, 0), size = size.large)
+plotshape(disparoS, "DISPARO corto",  shape.triangledown, location.abovebar,
+     color.new(color.red, 0), size = size.large)
+
+plot(i_minimal ? na : vwapSes, "VWAP", color = color.new(color.blue, 30), linewidth = 2)
+
+// =============================================================================
+//  12 · PANEL · una sola tabla
+// =============================================================================
+var table pnl = table.new(position.top_right, 2, 12, border_width = 1,
+     frame_width = 1, frame_color = color.new(color.gray, 50))
+
+f_fila(int r, string k, string v, color cv) =>
+    table.cell(pnl, 0, r, k, text_size = size.small, text_halign = text.align_left,
+         text_color = color.new(color.gray, 20))
+    table.cell(pnl, 1, r, v, text_size = size.small, text_halign = text.align_right,
+         text_color = cv)
+
+if i_verPanel and barstate.islast
+    string estTxt = "—"
+    color  estCol = color.new(color.gray, 20)
+    if not na(vivo)
+        estTxt := vivo.estado == 3 ? "DISPARO" : vivo.estado == 2 ? "ARMADO" : "VIGILAR"
+        estCol := vivo.estado == 3 ? (vivo.dir == 1 ? color.new(color.green, 0) : color.new(color.red, 0)) :
+             color.new(color.orange, 0)
+    else if hayVigilar
+        estTxt := "VIGILAR"
+
+    f_fila(0, "Sesgo",   sesgoTxt, sesgoCol)
+    f_fila(1, "Sesión",  sesTxt,   color.new(color.gray, 20))
+    f_fila(2, "Estado",  estTxt + (esChop ? " · chop" : ""), estCol)
+
+    if na(vivo)
+        f_fila(3, "Score", "—", color.new(color.gray, 40))
+        f_fila(4, "Niveles", "—", color.new(color.gray, 40))
+        f_fila(5, "R:R", "—", color.new(color.gray, 40))
+        f_fila(6, "Contratos", "—", color.new(color.gray, 40))
+    else
+        f_fila(3, "Score", str.tostring(vivo.score) + " " + f_etiqScore(vivo.score),
+             f_colScore(vivo.score))
+        // §1.1 · en spot se muestran también los precios equivalentes de MGC.
+        float bs = esSpot ? i_basis : 0.0
+        f_fila(4, esSpot and bs != 0 ? "E/SL/TP1 (MGC)" : "E/SL/TP1",
+             str.tostring(vivo.entrada + bs, format.mintick) + " / " +
+             str.tostring(vivo.sl + bs, format.mintick) + " / " +
+             (na(vivo.tp1) ? "—" : str.tostring(vivo.tp1 + bs, format.mintick)),
+             color.new(color.gray, 10))
+        f_fila(5, "R:R", na(vivo.rr) ? "—" : str.tostring(vivo.rr, "#.##") + "R",
+             na(vivo.rr) ? color.new(color.gray, 40) :
+             vivo.rr >= i_rrMin ? color.new(color.green, 0) : color.new(color.orange, 0))
+        // Contratos: informativo, nunca bloquea.
+        float riesgoPts = math.abs(vivo.entrada - vivo.sl)
+        int ctr = riesgoPts > 0 ? int(math.floor(i_riesgo / (riesgoPts * i_puntoUSD))) : 0
+        f_fila(6, "Contratos", str.tostring(ctr) + " MGC", color.new(color.gray, 10))
+
+    float dv = na(vwapSes) or nz(atr, 0) <= 0 ? na : (close - vwapSes) / atr
+    f_fila(7, "Dist. VWAP", na(dv) ? "—" : str.tostring(dv, "+#.#") + " ATR",
+         na(dv) ? color.new(color.gray, 40) :
+         math.abs(dv) > 2 ? color.new(color.orange, 0) : color.new(color.gray, 10))
+    f_fila(8, "Antigüedad", na(vivo) ? "—" :
+         str.tostring(bar_index - (vivo.estado == 3 ? vivo.barDisparo : vivo.barArmado)) + " velas",
+         color.new(color.gray, 10))
+
+    // Calibración: N siempre al lado de la cifra, para no creérsela antes de hora.
+    f_fila(9, "Nivel ↑ / ↓",
+         (nomArriba == "" ? "—" : nomArriba + " " + str.tostring(nivArriba, format.mintick)) +
+         "  ·  " + (nomAbajo == "" ? "—" : nomAbajo + " " + str.tostring(nivAbajo, format.mintick)),
+         color.new(color.gray, 10))
+
+    if i_verCalib
+        [eT, nT] = f_expectativa(-1, -1, -1)
+        int gan = 0
+        if array.size(calR) > 0
+            for i = 0 to array.size(calR) - 1
+                if array.get(calR, i) > 0
+                    gan += 1
+        f_fila(10, "Calib. total", nT == 0 ? "sin datos" :
+             "n=" + str.tostring(nT) + " · " + str.tostring(100.0 * gan / nT, "#") + "% · " +
+             str.tostring(eT, "+#.##") + "R",
+             nT < 30 ? color.new(color.gray, 40) :
+             eT > 0 ? color.new(color.green, 0) : color.new(color.red, 0))
+        [eN, nN] = f_expectativa(-1, -1, 2)
+        [eA, nA] = f_expectativa(-1, -1, 0)
+        f_fila(11, "NY / Asia",
+             "n=" + str.tostring(nN) + " " + (na(eN) ? "—" : str.tostring(eN, "+#.#") + "R") +
+             "  ·  n=" + str.tostring(nA) + " " + (na(eA) ? "—" : str.tostring(eA, "+#.#") + "R"),
+             color.new(color.gray, 20))
+
+// Avisos que no pueden pasar desapercibidos.
+var label lbAviso = na
+if barstate.islast
+    string av = ""
+    if not tfOk
+        av := "Cárgalo en 1m o 5m: en otra temporalidad el gatillo no aplica"
+    else if esSpot and i_basis == 0
+        av := "Gráfico SPOT sin base: los precios no son de MGC"
+    if av != ""
+        if na(lbAviso)
+            lbAviso := label.new(bar_index, close, "", style = label.style_label_left,
+                 color = color.new(color.orange, 20), textcolor = color.white, size = size.small)
+        label.set_xy(lbAviso, bar_index + 12, close)
+        label.set_text(lbAviso, av)
+    else if not na(lbAviso)
+        label.set_text(lbAviso, "")
+        label.set_color(lbAviso, color.new(color.gray, 100))
+
+// =============================================================================
+//  13 · ALERTAS · solo ARMADO y DISPARO, una vez por vela cerrada
+// =============================================================================
+f_payload(Setup s, string ev) =>
+    '{"event":"' + ev + '","symbol":"' + syminfo.ticker +
+     '","side":"' + (s.dir == 1 ? "long" : "short") +
+     '","entry":' + str.tostring(s.entrada + i_basis, format.mintick) +
+     ',"sl":' + str.tostring(s.sl + i_basis, format.mintick) +
+     ',"tp1":' + (na(s.tp1) ? "null" : str.tostring(s.tp1 + i_basis, format.mintick)) +
+     ',"tp2":' + (na(s.tp2) ? "null" : str.tostring(s.tp2 + i_basis, format.mintick)) +
+     ',"rr":' + (na(s.rr) ? "null" : str.tostring(s.rr, "#.##")) +
+     ',"score":' + str.tostring(s.score) +
+     ',"bias":"' + sesgoTxt + '","session":"' + sesTxt + '"}'
+
+if nuevoArmadoL and not na(sL)
+    alert(f_payload(sL, "armado"), alert.freq_once_per_bar_close)
+if nuevoArmadoS and not na(sS)
+    alert(f_payload(sS, "armado"), alert.freq_once_per_bar_close)
+if disparoL and not na(sL)
+    alert(f_payload(sL, "disparo"), alert.freq_once_per_bar_close)
+if disparoS and not na(sS)
+    alert(f_payload(sS, "disparo"), alert.freq_once_per_bar_close)
+
+// =============================================================================
+//  14 · CHECKLIST DE PRUEBAS
+// =============================================================================
+//  Hacerlas en este orden; las dos primeras son las que invalidan el resto si
+//  fallan.
+//
+//  1 · ANTI-REPINTADO (Bar Replay). Avanzar vela a vela por una sesión entera y
+//      anotar cada DISPARO con su hora y precio. Recargar el indicador y
+//      comparar contra el histórico: cualquier flecha que cambie de sitio, de
+//      vela o que desaparezca es repintado. Mirar con especial atención las
+//      zonas de 1H y diario y el sesgo, que son lo que viene de marcos
+//      superiores.
+//  2 · CUPO DE OBJETOS. Cargar seis meses de 5m y comprobar que no salta el
+//      error de límite de líneas, cajas o etiquetas, y que el panel sigue
+//      dibujándose en la última vela.
+//  3 · DÍA DE TENDENCIA. El sesgo debe mantenerse y no deberían aparecer
+//      DISPAROS contra él; si aparecen, el umbral contra tendencia está bajo.
+//  4 · DÍA DE RANGO. Debe haber VIGILAR y ARMADO pero muy pocos DISPAROS: el
+//      filtro de chop tiene que morder. Si dispara igual, subir el percentil.
+//  5 · SESIÓN ASIÁTICA. Comprobar que el filtro de chop frena la mayoría de
+//      señales sin necesidad de una ventana horaria. Si no las frena, el
+//      percentil es demasiado bajo para este instrumento.
+//  6 · APERTURA DE NY. Es donde debe concentrarse la actividad. Comprobar que
+//      el R:R mínimo no está descartando los mejores movimientos por llegar
+//      tarde al nivel.
+//  7 · TEMA CLARO. Cambiar a fondo blanco y verificar que etiquetas y niveles
+//      siguen legibles.
+//  8 · MINIMAL. Activar el modo y comprobar que quedan panel, dos niveles y la
+//      señal activa, y nada más.
