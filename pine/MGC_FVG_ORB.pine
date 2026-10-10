@@ -332,8 +332,14 @@ i_maxVisLado = input.int(3, "Zonas visibles por lado (5m)", minval = 1, maxval =
 i_verConsum  = input.bool(false, "Mostrar zonas consumidas", group = G_VIS,
      tooltip = "Desactivado por defecto: una zona consumida ya no sirve de entrada y solo añade ruido. Si se activa, sale en gris apagado " +
                "y sin texto.")
-i_pasoRedondo = input.string("50", "Paso de números redondos (USD)", options = ["25", "50", "100"], group = G_VIS,
-     tooltip = "Se dibujan solo los dos niveles por encima y los dos por debajo del precio.")
+// Este input NO es visual aunque esté escrito entre los visuales: el paso de
+// números redondos lo leen el score (confluencia de nivel) y el filtro de
+// holgura cuando se eligen "+ números redondos" como obstáculo. Por eso va en
+// Filtros. Lo que decide si se dibujan o no es i_verRedondos, que sí es visual.
+i_pasoRedondo = input.string("50", "Paso de números redondos (USD)", options = ["25", "50", "100"], group = G_FLT,
+     tooltip = "Rejilla de números redondos. La usan la confluencia de nivel del score y, si se eligen como obstáculo, el filtro de " +
+               "holgura. Cambiarlo cambia decisiones de trading, no solo el dibujo. En el gráfico se pintan los dos niveles por encima " +
+               "y los dos por debajo del precio.")
 i_verRedondos = input.bool(true, "Dibujar números redondos", group = G_VIS)
 i_verRangos   = input.bool(true, "Dibujar rangos Asia / Londres", group = G_VIS)
 i_verEtiqLvl  = input.bool(true, "Etiquetar niveles al borde derecho", group = G_VIS)
@@ -865,11 +871,11 @@ f_addZone(float top, float bot, int dir, string tfName, int prio, float tfAtr) =
     array.set(zonaSeq, 0, array.get(zonaSeq, 0) + 1)
     int zid = array.get(zonaSeq, 0)
     Zona z = Zona.new(top = top, bot = bot, mid = (top + bot) / 2.0, dir = dir, tf = tfName,
-                    prio = prio, tfAtr = tfAtr, id = zid, state = 0, inverted = false, fired = false,
-                    ceBar = -1, bornBar = bar_index, tNace = time, liqPrevia = f_liqPrevia(dir),
-                    esSB = false, sbSwing = na,
-                    score = 0, tier = 0, scoreTxt = "", bx = na, visible = true,
-                    elegida = false, rendTier = -1, rendEst = -1)
+                     prio = prio, tfAtr = tfAtr, id = zid, state = 0, inverted = false, fired = false,
+                     ceBar = -1, bornBar = bar_index, tNace = time, liqPrevia = f_liqPrevia(dir),
+                     esSB = false, sbSwing = na,
+                     score = 0, tier = 0, scoreTxt = "", bx = na, visible = true,
+                     elegida = false, rendTier = -1, rendEst = -1)
     if i_showBoxes
         z.bx := box.new(bar_index, top, bar_index, bot,
              border_color = f_zoneBorder(dir, 0),
