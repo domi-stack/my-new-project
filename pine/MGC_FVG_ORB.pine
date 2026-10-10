@@ -59,24 +59,21 @@ f_tickPoints = input.float(0.10, "Tamaño de tick (pts)", group = G_INS, minval 
 
 // --- Ventana de operativa ----------------------------------------------------
 const string G_SES = "Ventana de operativa"
-//  24 H VUELVE A SER EL DEFECTO, pero no a secas.
-//  El problema que lo había desterrado sigue existiendo: el día CME empieza a
-//  las 18:00 ET, o sea a medianoche en Madrid, así que con una sola operación al
-//  día la primera señal que aparezca —normalmente en Asia— bloquea la sesión de
-//  Nueva York, que es la de más rango. Lo que lo hace viable es el filtro de
-//  hora plana de la sección 2b, que mide el rango de cada hora sobre el propio
-//  gráfico y veta las crónicamente planas. Desactivar ese filtro en modo 24 h
-//  devuelve el problema tal cual.
+//  24 H ES EL DEFECTO POR DECISIÓN DEL USUARIO.
+//  La estrategia opera a cualquier hora y con varias operaciones al día. El
+//  filtro de hora plana de la sección 2b sigue disponible y mide el rango de
+//  cada hora sobre el propio gráfico, pero es una herramienta a mano, no una
+//  condición para usar el modo.
 //
-//  El cupo de 1 operación al día NO se ha tocado: subirlo es una decisión de
-//  cuenta y multiplica el riesgo diario, así que necesita instrucción expresa.
+//  Los modos de ventana se conservan porque 'Ventana NY' con el límite diario
+//  en 1, frenos a 0 y los disparadores nuevos apagados es la combinación de la
+//  línea base de regresión.
 i_modoHora    = input.string("24 h", "Modo horario", options = ["24 h", "Ventana NY", "Ventana Madrid"], group = G_SES,
-     tooltip = "24 H: señales a cualquier hora, con el día de trading de CME, parón de entradas alrededor del cierre diario y cierre " +
-               "forzoso antes del fin de semana. Va acompañado del filtro de hora plana, que es lo que evita que una hora muerta se lleve " +
-               "la operación del día; si lo desactivas, vuelve ese problema.\n\n" +
-               "VENTANA NY / VENTANA MADRID: solo dentro de la ventana, como antes.\n\n" +
-               "'Ventana NY' con 'Operar solo zonas ALTA' desactivado y los disparadores nuevos apagados es la línea base de regresión " +
-               "v2.2 (ver backtests/README.md).")
+     tooltip = "24 H es el defecto: señales a cualquier hora, con el día de trading de CME, parón de entradas alrededor del cierre diario " +
+               "de CME y cierre forzoso antes del fin de semana.\n\n" +
+               "VENTANA NY / VENTANA MADRID: solo dentro de la ventana.\n\n" +
+               "'Ventana NY' con el máximo diario en 1, los frenos a 0 y los disparadores nuevos apagados es la combinación de la línea " +
+               "base de regresión v2.2 (ver backtests/README.md).")
 i_horizonte   = input.float(8.0, "Horizonte máximo de la operación (horas)", minval = 0.5, step = 0.5, group = G_SES,
      tooltip = "Solo en modo 24 h. Lo que ocurra antes, cierre forzoso u horizonte, cierra la posición.")
 // --- Filtro de hora plana (v2.5) --------------------------------------------
