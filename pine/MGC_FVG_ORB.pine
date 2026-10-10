@@ -2275,9 +2275,14 @@ if i_soloAlta and barstate.islast
     table.cell(limpia, 1, 1, zTxt, text_size = size.small,
          text_color = zDir == 1 ? color.new(color.green, 0) : zDir == -1 ? color.new(color.red, 0) : chart.fg_color)
 
+    // El freno aparece aquí y no en una fila propia: lo que necesitas saber es
+    // "hoy ya no se opera", y eso pertenece a la fila del día.
+    bool frenado = f_frenoActivo()
     table.cell(limpia, 0, 2, "Hoy", text_size = size.small)
     table.cell(limpia, 1, 2, str.tostring(tradesToday) + " / " + str.tostring(i_maxTrades) +
-         " · " + str.tostring(rHoy, "+#.##") + "R", text_size = size.small)
+         " · " + str.tostring(rHoy, "+#.##") + "R" + (frenado ? " · FRENO" : ""),
+         text_size = size.small,
+         text_color = frenado ? color.new(color.orange, 0) : chart.fg_color)
 
     table.cell(limpia, 0, 3, "Calibración", text_size = size.small)
     table.cell(limpia, 1, 3, CAL_TXT, text_size = size.small, text_color = color.new(color.orange, 0))
