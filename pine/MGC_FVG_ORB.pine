@@ -788,6 +788,7 @@ type Zona
     // --- dibujo
     box    bx
     bool   visible    // la caja se oculta mutándola, nunca se borra en vida
+    bool   elegida    // llegó a destacarse alguna vez en modo limpio
     int    rendTier   // tier ya renderizado, para no restilar sin cambio
     int    rendEst    // estado ya renderizado
 
@@ -861,7 +862,7 @@ f_addZone(float top, float bot, int dir, string tfName, int prio, float tfAtr) =
                     ceBar = -1, bornBar = bar_index, tNace = time, liqPrevia = f_liqPrevia(dir),
                     esSB = false, sbSwing = na,
                     score = 0, tier = 0, scoreTxt = "", bx = na, visible = true,
-                    rendTier = -1, rendEst = -1)
+                    elegida = false, rendTier = -1, rendEst = -1)
     if i_showBoxes
         z.bx := box.new(bar_index, top, bar_index, bot,
              border_color = f_zoneBorder(dir, 0),
@@ -1221,6 +1222,17 @@ f_restaurarZona(Zona z) =>
             box.set_text_color(z.bx, chart.fg_color)
             box.set_text_size(z.bx, size.small)
 
+// Una zona que ya se destacó alguna vez no se oculta del todo al dejar de ser
+// la elegida: se atenúa. Así el gráfico conserva la memoria de dónde estaban
+// las zonas que importaron, sin que compitan con la actual.
+f_atenuarZona(Zona z) =>
+    if not na(z.bx)
+        color col = z.dir == 1 ? color.green : color.red
+        box.set_bgcolor(z.bx, color.new(col, z.state >= 2 ? 88 : 78))
+        box.set_border_color(z.bx, color.new(col, z.state >= 2 ? 75 : 55))
+        box.set_border_width(z.bx, 1)
+        box.set_text(z.bx, "")
+
 f_destacarZona(Zona z) =>
     if not na(z.bx)
         color col = z.dir == 1 ? color.green : color.red
@@ -1274,7 +1286,11 @@ if i_soloAlta and barstate.isconfirmed and array.size(zones) > 0
     altaArriba := -1
     altaAbajo  := -1
     for i = 0 to array.size(zones) - 1
-        f_ocultarZona(array.get(zones, i))
+        Zona zo = array.get(zones, i)
+        if zo.elegida
+            f_atenuarZona(zo)
+        else
+            f_ocultarZona(zo)
     for k = 0 to array.size(ceLines) - 1
         line.set_color(array.get(ceLines, k), color.new(color.gray, 100))
 
@@ -1303,6 +1319,8 @@ if i_soloAlta and barstate.isconfirmed and array.size(zones) > 0
             if bestI >= 0
                 array.push(elegidas, bestI)
                 Zona zb = array.get(zones, bestI)
+                zb.elegida := true
+                array.set(zones, bestI, zb)
                 f_destacarZona(zb)
                 if k == 1
                     if lado == 1
