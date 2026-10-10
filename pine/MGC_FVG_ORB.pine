@@ -229,6 +229,9 @@ i_soloAlta  = input.bool(true, "Modo solo alta probabilidad", group = G_LIM,
      tooltip = "Deja en el gráfico como mucho una zona por encima y una por debajo del precio, en el tono más oscuro, y oculta todo lo demás. " +
                "Lo oculto sigue calculándose: solo deja de dibujarse.")
 i_altaPorLado = input.int(1, "Zonas visibles por lado", minval = 1, maxval = 3, group = G_LIM)
+i_marcasLimpio = input.bool(true, "Marcas de CHoCH y barridos en modo limpio", group = G_LIM,
+     tooltip = "Son marcas de una vela, no niveles permanentes: no saturan y dicen por qué una zona empezó a importar. " +
+               "Desactívalo si quieres el gráfico absolutamente desnudo.")
 
 // ATENCIÓN · SIN CALIBRAR
 //  El documento v2.1 define "alta probabilidad" con el histórico (su §1), no con
@@ -2137,12 +2140,12 @@ plot(verExtras and i_showLvls and inSession ? sessOpen : na, "Apertura sesión",
 
 bgcolor(verExtras and inSession ? color.new(color.blue, 94) : na, title = "Ventana de operativa")
 
-plotshape(verExtras and chochUp,   "CHoCH alcista",      shape.triangleup,   location.belowbar, color.new(color.lime,    0), size = size.tiny)
-plotshape(verExtras and chochDn,   "CHoCH bajista",      shape.triangledown, location.abovebar, color.new(color.red,     0), size = size.tiny)
+plotshape((verExtras or i_marcasLimpio) and chochUp,   "CHoCH alcista",      shape.triangleup,   location.belowbar, color.new(color.lime,    0), size = size.tiny)
+plotshape((verExtras or i_marcasLimpio) and chochDn,   "CHoCH bajista",      shape.triangledown, location.abovebar, color.new(color.red,     0), size = size.tiny)
 plotshape(verExtras and bosUp,     "BOS alcista",        shape.circle,       location.belowbar, color.new(color.teal,   40), size = size.tiny)
 plotshape(verExtras and bosDn,     "BOS bajista",        shape.circle,       location.abovebar, color.new(color.maroon, 40), size = size.tiny)
-plotshape(verExtras and sweepBull, "Barrido de mínimos", shape.xcross,       location.belowbar, color.new(color.aqua,    0), size = size.tiny)
-plotshape(verExtras and sweepBear, "Barrido de máximos", shape.xcross,       location.abovebar, color.new(color.fuchsia, 0), size = size.tiny)
+plotshape((verExtras or i_marcasLimpio) and sweepBull, "Barrido de mínimos", shape.xcross,       location.belowbar, color.new(color.aqua,    0), size = size.tiny)
+plotshape((verExtras or i_marcasLimpio) and sweepBear, "Barrido de máximos", shape.xcross,       location.abovebar, color.new(color.fuchsia, 0), size = size.tiny)
 
 // Fondo de la ventana Silver Bullet, en un tono distinto y más tenue que el de
 // la ventana de operativa. Dos fondos superpuestos es el límite de lo legible.
