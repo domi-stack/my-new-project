@@ -102,7 +102,8 @@ i_sessMadrid  = input.session("1530-1900", "Ventana (hora de Madrid)", group = G
 i_sessNY      = input.session("0930-1300", "Ventana (hora de NY)",     group = G_SES)
 i_closeMadrid = input.int(21, "Hora de cierre forzoso (Madrid)", minval = 0, maxval = 23, group = G_SES)
 i_closeNY     = input.int(15, "Hora de cierre forzoso (NY)",     minval = 0, maxval = 23, group = G_SES)
-i_maxTrades   = input.int(1,  "Máximo de operaciones al día",    minval = 1, maxval = 5,  group = G_SES)
+i_maxTrades   = input.int(3,  "Máximo de operaciones al día",    minval = 1, maxval = 10, group = G_SES,
+     tooltip = "Cuenta por día de trading, que en modo 24 h empieza a las 18:00 ET. Ponlo en 1 para reproducir la línea base de regresión.")
 
 // --- Fair Value Gaps ---------------------------------------------------------
 const string G_FVG = "Fair Value Gaps"
