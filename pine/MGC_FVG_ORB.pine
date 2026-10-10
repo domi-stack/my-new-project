@@ -76,6 +76,19 @@ i_modoHora    = input.string("24 h", "Modo horario", options = ["24 h", "Ventana
                "base de regresión v2.2 (ver backtests/README.md).")
 i_horizonte   = input.float(8.0, "Horizonte máximo de la operación (horas)", minval = 0.5, step = 0.5, group = G_SES,
      tooltip = "Solo en modo 24 h. Lo que ocurra antes, cierre forzoso u horizonte, cierra la posición.")
+
+// --- Freno diario y enfriamiento · TODOS APAGADOS (0) por defecto -----------
+//  Están disponibles, no impuestos. Con todo a 0 el comportamiento es el de no
+//  tener frenos, que es lo que la regresión necesita.
+i_maxPerdDia  = input.int(0, "Freno · pérdidas seguidas al día (0 = sin freno)", minval = 0, maxval = 20, group = G_SES,
+     tooltip = "Al alcanzar este número de operaciones perdedoras en el día de trading, no se abren más. 0 lo desactiva.")
+i_minRDia     = input.float(0.0, "Freno · pérdida máxima del día en R (0 = sin freno)", minval = -20.0, maxval = 0.0, step = 0.5, group = G_SES,
+     tooltip = "Valor negativo o cero. Si el resultado acumulado del día baja de este nivel, no se abren más operaciones. 0 lo desactiva.")
+i_maxRDia     = input.float(0.0, "Freno · ganancia del día en R (0 = sin freno)", minval = 0.0, maxval = 20.0, step = 0.5, group = G_SES,
+     tooltip = "Valor positivo o cero. Si el resultado acumulado del día sube de este nivel, se deja de operar y se protege lo ganado. " +
+               "0 lo desactiva.")
+i_enfriar     = input.int(0, "Enfriamiento entre operaciones (velas, 0 = sin espera)", minval = 0, maxval = 200, group = G_SES,
+     tooltip = "Velas que deben pasar desde el cierre de una operación antes de abrir la siguiente. 0 lo desactiva.")
 // --- Filtro de hora plana (v2.5) --------------------------------------------
 //  Es lo que hace viable el modo 24 h con una sola operación al día: sin él, el
 //  cupo se gasta en la primera señal del día CME y Nueva York se queda fuera.
@@ -386,11 +399,14 @@ else
 var int   lastDayKey  = na
 var int   tradesToday = 0
 var float rHoy        = 0.0
+var int   perdHoy     = 0   // operaciones perdedoras cerradas en el día
+var int   ultSalidaBar = na // vela del último cierre, para el enfriamiento
 bool nuevoDia = na(lastDayKey) or dayKey != lastDayKey
 if nuevoDia
     lastDayKey  := dayKey
     tradesToday := 0
     rHoy        := 0.0
+    perdHoy     := 0
 
 // El arranque de sesión reinicia VWAP y extremos: en modo 24 h es el cambio de
 // día CME; en los modos de ventana, la entrada en la ventana.
@@ -1538,6 +1554,14 @@ f_stopDeZona(Zona z) =>
     na(s) ? na : (isLong ? math.floor(s / f_tickPoints) * f_tickPoints
                          : math.ceil( s / f_tickPoints) * f_tickPoints)
 
+// ¿Hay algún freno diario encendido y cumplido? Los tres son independientes y
+// con su input a 0 no existen, así que con los defectos esto es siempre falso.
+f_frenoActivo() =>
+    bool porPerdidas = i_maxPerdDia > 0 and perdHoy >= i_maxPerdDia
+    bool porSuelo    = i_minRDia < 0 and rHoy <= i_minRDia
+    bool porTecho    = i_maxRDia > 0 and rHoy >= i_maxRDia
+    porPerdidas or porSuelo or porTecho
+
 // La máscara. `zScore` solo entra por el veto de fuerza mínima, que es el único
 // punto donde la puntuación influye en una decisión de trading.
 f_mascara(int dir, float entrada, float stop, bool esFvg, int zScore) =>
@@ -1547,9 +1571,15 @@ f_mascara(int dir, float entrada, float stop, bool esFvg, int zScore) =>
     // Contexto, no setup.
     if (not inWindow) or forceOut
         m += V_VENTANA
-    if tradesToday >= i_maxTrades
+    // El freno diario comparte bit con el límite diario: las dos cosas son
+    // "hoy ya no se opera más", así que no hace falta un bit nuevo.
+    if tradesToday >= i_maxTrades or f_frenoActivo()
         m += V_DIARIO
-    if strategy.position_size != 0
+    // El enfriamiento comparte bit con la posición abierta: las dos son "ahora
+    // mismo no, espera".
+    bool enfriando = i_enfriar > 0 and not na(ultSalidaBar) and
+         (bar_index - ultSalidaBar) < i_enfriar
+    if strategy.position_size != 0 or enfriando
         m += V_POSIC
 
     if not f_mtfOk(isLong)
@@ -1869,6 +1899,10 @@ if strategy.closedtrades > nz(strategy.closedtrades[1], 0)
         float riesgoPlan = array.get(ops, ci).riesgoUSD
         if riesgoPlan > 0
             rHoy += strategy.closedtrades.profit(ci) / riesgoPlan
+        // Contadores del freno y del enfriamiento.
+        if strategy.closedtrades.profit(ci) < 0
+            perdHoy += 1
+    ultSalidaBar := bar_index
 
 // =============================================================================
 //  8b · CAPA DE ACCIÓN · qué hacer ahora (v2 §3)
