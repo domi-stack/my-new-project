@@ -2,8 +2,12 @@
 // =============================================================================
 //  MGC 12-26 (Micro Gold Futures) · FVG + Estructura de mercado · 5 minutos
 // =============================================================================
-//  Estrategia de una sola operación diaria sobre zonas de imbalance (Fair Value
-//  Gaps) validadas por estructura de mercado multimarco.
+//  Estrategia de varias operaciones diarias (v2.6) sobre zonas de imbalance
+//  (Fair Value Gaps) validadas por estructura de mercado multimarco.
+//
+//  Opera a cualquier hora y con varias operaciones al día, por decisión del
+//  usuario. Los frenos diarios y el enfriamiento existen pero vienen a 0, o
+//  sea apagados: hay que encenderlos a mano.
 //
 //  DECISIONES DE DISEÑO (acordadas antes de escribir el código):
 //   1. Conflicto entre marcos: por defecto se opera el 5m hacia el siguiente
