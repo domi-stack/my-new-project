@@ -33,20 +33,50 @@ El objetivo de 300 USD son 30 puntos con 1 contrato, es decir **2R**. Con el ATR
 
 ---
 
-## 2. Ventana de operativa
+## 2. Ventana de operativa y límite diario
 
-Las entradas solo ocurren dentro de la ventana; la posición puede correr más allá, pero nunca pasada la hora de cierre forzoso, que manda sobre stop y objetivo.
+**Desde la v2.6 el modo por defecto es 24 h, por decisión del usuario.** Se opera a cualquier hora y con varias operaciones al día. Lo que sigue describe los tres modos, porque los dos de ventana se conservan y uno de ellos es la línea base de regresión.
 
-Dos anclajes seleccionables:
+| Modo horario | Entradas | Cierre forzoso |
+|---|---|---|
+| **24 h** (*por defecto*) | a cualquier hora del día de trading de CME, que empieza a las 18:00 ET | parón alrededor del cierre diario de CME, cierre antes del fin de semana y horizonte máximo de 8 h por operación |
+| Ventana NY | 09:30-13:00 `America/New_York` | 15:00 NY |
+| Ventana Madrid | 15:30-19:00 `Europe/Madrid` | 21:00 Madrid |
 
-| Anclaje | Ventana | Cierre forzoso |
-|---------|---------|----------------|
-| Reloj de Madrid | 15:30-19:00 `Europe/Madrid` | 21:00 Madrid |
-| Apertura de NY (**por defecto**) | 09:30-13:00 `America/New_York` | 15:00 NY |
+En los modos de ventana las entradas solo ocurren dentro de ella; la posición puede correr más allá, pero nunca pasada la hora de cierre forzoso, que manda sobre stop y objetivo.
 
-**Por qué existen los dos.** Europa y EE.UU. cambian de hora en fechas distintas. Entre el **25 de octubre y el 1 de noviembre de 2026**, Madrid está en UTC+1 con Nueva York todavía en UTC-4: esa semana, las 15:30 de Madrid son las 10:30 de Nueva York, una hora después de la apertura. Anclar a la apertura mantiene la ventana sobre la sesión que mueve el oro; anclar a Madrid es más cómodo para operar en vivo. La detección usa `time(timeframe.period, sesión, zona)`, que gestiona el horario de verano de cada zona por su cuenta.
+**Por qué existen los dos anclajes de ventana.** Europa y EE.UU. cambian de hora en fechas distintas. Entre el **25 de octubre y el 1 de noviembre de 2026**, Madrid está en UTC+1 con Nueva York todavía en UTC-4: esa semana, las 15:30 de Madrid son las 10:30 de Nueva York, una hora después de la apertura. Anclar a la apertura mantiene la ventana sobre la sesión que mueve el oro; anclar a Madrid es más cómodo para operar en vivo. La detección usa `time(timeframe.period, sesión, zona)`, que gestiona el horario de verano de cada zona por su cuenta.
 
-Máximo **1 operación al día** (configurable), con el contador reiniciado por día natural de la zona de anclaje.
+### Límite diario
+
+Máximo **3 operaciones al día** por defecto, hasta 10, con el contador reiniciado por día de trading: en modo 24 h el día empieza a las 18:00 ET, no a medianoche.
+
+Ponerlo en **1** junto a `Modo horario = Ventana NY`, los frenos a 0 y los disparadores nuevos apagados reproduce la línea base de regresión v2.2 (ver `backtests/README.md`).
+
+### Frenos diarios y enfriamiento
+
+Cuatro controles, **los cuatro a 0 —es decir, apagados— por defecto**. Están disponibles, no impuestos: con todo a 0 el comportamiento es el de no tener frenos, que es lo que la regresión necesita.
+
+| Input | Qué hace al activarlo |
+|---|---|
+| Freno · pérdidas seguidas al día | al llegar a N perdedoras en el día, no se abren más |
+| Freno · pérdida máxima del día en R | si el acumulado del día baja de ese nivel (negativo), se deja de operar |
+| Freno · ganancia del día en R | si el acumulado del día sube de ese nivel, se protege lo ganado y se deja de operar |
+| Enfriamiento entre operaciones | velas que deben pasar desde el cierre de una operación antes de abrir la siguiente |
+
+Los frenos **no añaden bits nuevos a la máscara de vetos**: comparten `límite diario` los tres primeros y `posición abierta` el enfriamiento, para que los contadores de la tabla no cambien de significado entre versiones. Cuando un freno está cortando, la fila `Hoy` de la tabla limpia añade `· FRENO` y se pone naranja.
+
+### La señal en el gráfico
+
+Confirmada **al cierre de vela**, nunca intravela. La etiqueta tiene tres líneas:
+
+```
+COMPRA 15:42
+E 3412.6  SL 3404.1  TP 3429.6
+1c · 85 $
+```
+
+dirección y hora de Madrid, los tres precios, y contratos con el riesgo en dólares. Se dibujan además tres líneas horizontales desde la vela de entrada —entrada en gris discontinuo, stop en rojo, objetivo en verde— que se extienden mientras la posición vive.
 
 ---
 
@@ -211,12 +241,17 @@ Las dos últimas filas son las importantes cuando la queja es "salen pocas seña
 ### Ventana de operativa
 | Input | Defecto |
 |-------|---------|
-| Anclaje de la ventana | Apertura de NY |
+| Modo horario | **24 h** |
+| Horizonte máximo de la operación (horas) | 8.0 |
 | Ventana (hora de Madrid) | 1530-1900 |
 | Ventana (hora de NY) | 0930-1300 |
 | Hora de cierre forzoso (Madrid) | 21 |
 | Hora de cierre forzoso (NY) | 15 |
-| Máximo de operaciones al día | 1 |
+| Máximo de operaciones al día | **3** (máx. 10) |
+| Freno · pérdidas seguidas al día | 0 (apagado) |
+| Freno · pérdida máxima del día en R | 0.0 (apagado) |
+| Freno · ganancia del día en R | 0.0 (apagado) |
+| Enfriamiento entre operaciones (velas) | 0 (apagado) |
 
 ### Fair Value Gaps
 | Input | Defecto |
@@ -287,7 +322,7 @@ Por orden de importancia:
 3. **Racha perdedora máxima**. Con una operación al día, una racha de ocho son ocho días seguidos en rojo. Decide si lo aguantas antes de empezar.
 4. **Porcentaje de operaciones cerradas por cierre forzoso**. Si supera el 30%, la ventana es demasiado corta para el objetivo que se pide.
 
-**Tamaño de muestra:** hacen falta **40 operaciones para que el signo de la esperanza no sea ruido y 100 para fiarse de la magnitud**. Con filtros restrictivos y una operación diaria, eso son entre cuatro y diez meses de datos. Cualquier conclusión con 15 operaciones es una anécdota.
+**Tamaño de muestra:** hacen falta **40 operaciones para que el signo de la esperanza no sea ruido y 100 para fiarse de la magnitud**. Con el cupo diario en 3 y modo 24 h el ritmo es mayor que con una operación diaria, pero sigue dependiendo de lo restrictivos que sean los filtros: cuenta con **entre dos y diez meses** de datos y comprueba el número real de operaciones antes de concluir nada. Cualquier conclusión con 15 operaciones es una anécdota.
 
 **Señales de que no hay ventaja:**
 

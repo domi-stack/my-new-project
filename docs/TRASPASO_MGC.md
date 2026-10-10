@@ -1,10 +1,11 @@
 # MGC · Estado del bot para traspaso
 
-Documento de contexto para continuar el trabajo en otra conversación. Fecha: 1 de octubre de 2026.
+Documento de contexto para continuar el trabajo en otra conversación. Fecha: 10 de octubre de 2026.
 
 **Fichero**: `pine/MGC_FVG_ORB.pine` · Pine Script v6 · `strategy()` · MGC 5 minutos
-**Tamaño**: 2.265 líneas, 75 inputs
-**Versión**: v2.2 (cinco correcciones previas a la primera ejecución, aplicadas)
+**Tamaño**: 2.530 líneas, 85 inputs
+**Versión**: v2.6 (varias operaciones diarias, a cualquier hora, por decisión del usuario)
+**Segundo fichero**: `pine/MGC_v5_indicador.pine` · 996 líneas · `indicator()` · 24 h, puerta de calidad única. **Falta su versión `strategy()`**, que estaba pedida en el mismo encargo.
 **Repos**: `domi-stack/crisol` (main) y `domi-stack/my-new-project` (rama `claude/orb-day-trading-bot-es-3bo9db`, PR #1 abierto)
 
 Documentos de especificación que se han seguido, en orden de precedencia creciente:
@@ -94,6 +95,49 @@ Seis commits (`2123543` a `65a2869`):
 - **C4 · Línea base de regresión.** Protocolo en `backtests/README.md`. La anterior no servía: la versión de partida no operaba nunca y tres correcciones cambian decisiones a propósito.
 - **C5 · Defectos seguros.** Modo horario vuelve a **`Ventana NY`**. Con 1 operación al día y sin calibración, el modo 24 h gasta el cupo en la primera señal del día CME (que empieza a medianoche en Madrid) y bloquea la sesión de Nueva York. El modo 24 h queda para observar.
 - **Exportador de Pine Logs** (apagado por defecto) con registros `Z`/`E`/`D` e ids de zona, más `paridad/comparar.py` probado.
+
+---
+
+### v2.3 y v2.4 · Paridad
+
+Nueve commits (`f5384f4` a `5ce8837`). Ninguno toca una decisión de trading: todos sirven a la prueba de paridad de `paridad/README.md`.
+
+- **v2.3-1 · Bug de repintado.** El ATR dentro de `f_htfFvg` no estaba desplazado bajo `lookahead_on`. Como alimenta el test de anchura mínima, **el criterio que decidía si existía un hueco repintaba él mismo**. Auditadas después todas las expresiones `lookahead_on`.
+- **v2.3-2 a v2.3-5, v2.4-1 a v2.4-4.** Exportación acotada a un rango con inventario `S` de las zonas vivas al abrirlo (y con la fecha de **nacimiento** como clave, no la de apertura del rango), registros `P` de purga FIFO, el comparador aceptándolos y comprobando dirección y momento, la separación entre paridad de código y paridad de datos, la especificación de `detectar.py` y el rango por defecto de un solo día (un mes desbordaba el panel de logs).
+
+---
+
+### v2.5 · Filtro de hora plana
+
+Un commit (`98dd521`). Mide el rango medio de cada hora del día **sobre el propio gráfico** y veta las horas que quedan por debajo de una fracción de la media de todas, con muestra mínima antes de vetar. Es lo que hacía viable el modo 24 h cuando el cupo era de una operación al día: sin él, la primera señal del día CME —normalmente en Asia— se llevaba la operación y Nueva York se quedaba fuera. Con el cupo en 3 deja de ser imprescindible, pero sigue encendido por defecto.
+
+---
+
+### v2.6 · Varias operaciones diarias, a cualquier hora
+
+Once commits (`17ba3d8` a `f1d04a8`). **Son decisiones del usuario, no recomendaciones mías**, y el encargo decía explícitamente que no se discutieran: varias operaciones al día, a cualquier hora, señales confirmadas al cierre de vela y gráfico con colores claros. Ninguna regla de entrada, stop, objetivo, filtro ni sizing cambia.
+
+| Punto | Cambio |
+|---|---|
+| 1 | `max_lines_count` de 100 a 400: las líneas de operación nuevas no caben en 100 |
+| 2 | `Modo horario` vuelve a **24 h** por defecto. Esto **revierte C5 de la v2.2**, que lo había puesto en `Ventana NY` por prudencia. El tooltip y el comentario dicen ahora que es el defecto por decisión del usuario, y que `Ventana NY` se conserva porque es parte de la línea base |
+| 3 | Máximo de operaciones al día: **3** por defecto, techo de 10 |
+| 4 | Freno diario (pérdidas seguidas, suelo en R, techo en R) y enfriamiento entre operaciones. **Los cuatro a 0, apagados.** No añaden bits a la máscara: comparten `límite diario` y `posición abierta`, para que los contadores de veto no cambien de significado |
+| 5 | Etiqueta de señal en tres líneas: dirección y hora de Madrid, los tres precios, contratos y riesgo en dólares. Cola FIFO de 200 intacta |
+| 6 | Tres líneas horizontales por operación (entrada gris discontinua, stop roja, objetivo verde), extendidas mientras vive la posición, con cola FIFO de 90 |
+| 7 | Campo `Zona.elegida` y `f_atenuarZona`: en modo limpio, una zona que llegó a destacarse deja un rastro atenuado en vez de desaparecer |
+| 8 | `i_marcasLimpio` (encendido): las marcas de CHoCH y de barrido sobreviven al modo limpio |
+| 9 | La fila `Hoy` de la tabla limpia añade `· FRENO` y se pone naranja cuando un freno está cortando |
+| 10 | Cabecera del script: decía "una sola operación diaria", que era lo contrario de lo configurado |
+
+**Dos arreglos de las comprobaciones de cierre** (`f1d04a8`), ninguno de ellos toca una regla:
+
+- Las cinco líneas de continuación de `Zona.new()` estaban a 20 espacios. Pine exige que la indentación de una continuación **no** sea múltiplo de cuatro, porque si lo es la lee como un bloque anidado. Pasan a 21.
+- `i_pasoRedondo` estaba en el grupo **Visual**, pero lo leen la confluencia de nivel del score y el filtro de holgura cuando se eligen los números redondos como obstáculo: decide entradas. Pasa a **Filtros**, con el tooltip diciéndolo. El valor por defecto no cambia, así que la regresión no se mueve.
+
+Los otros tres controles de la lista salen limpios: paréntesis balanceados, todo declarado antes de usarse y ninguna función asignando a una variable global.
+
+**Regresión.** Con `Modo horario = Ventana NY`, máximo diario en 1, los cuatro frenos a 0 y los disparadores nuevos apagados, la lista de operaciones debe coincidir con `backtests/baseline-v2.2.csv`. Esa comparación **no se ha podido hacer**: el CSV de la línea base sigue sin generarse porque requiere TradingView (ver §1).
 
 ---
 
