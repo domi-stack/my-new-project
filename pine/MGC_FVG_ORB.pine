@@ -1650,6 +1650,11 @@ var float  pendTarget = na
 // lleve por delante los pools creados al principio del gráfico.
 var array<label> lblSenales = array.new<label>()
 
+// Líneas de entrada, stop y objetivo de cada operación, con su propia cola.
+var array<line> lnOps  = array.new<line>()
+var bool        lnVivas = false
+var int         lnBar   = na   // vela de entrada de las tres líneas en curso
+
 var string openId     = ""   // id del disparador de la posición abierta
 var int    openTime   = na   // marca de entrada, para el horizonte máximo
 
@@ -1862,6 +1867,21 @@ if setDir != 0 and confBar and not na(atr)
                 while array.size(lblSenales) > 200
                     label.delete(array.shift(lblSenales))
 
+                // Tres líneas desde la vela de señal. Se extienden vela a vela
+                // mientras la operación viva y se quedan fijas al cerrarse, así
+                // que el gráfico conserva la geometría de cada operación sin
+                // repintarla.
+                array.push(lnOps, line.new(bar_index, entry, bar_index, entry,
+                     color = color.new(color.gray, 25), style = line.style_dashed, width = 1))
+                array.push(lnOps, line.new(bar_index, stop, bar_index, stop,
+                     color = color.new(color.red, 15), style = line.style_solid, width = 2))
+                array.push(lnOps, line.new(bar_index, target, bar_index, target,
+                     color = color.new(color.green, 15), style = line.style_solid, width = 2))
+                while array.size(lnOps) > 90
+                    line.delete(array.shift(lnOps))
+                lnVivas := true
+                lnBar   := bar_index
+
             // Registro D: disparo de entrada. Solo escribe.
             if enRangoLog
                 log.info("D,{0},{1},{2},{3},{4},{5},{6},{7}",
@@ -1886,6 +1906,19 @@ if setDir != 0 and confBar and not na(atr)
 // disparador que abrió la posición, no a un id fijo.
 if strategy.position_size != 0 and not na(pendStop) and openId != ""
     strategy.exit("salida " + openId, from_entry = openId, stop = pendStop, limit = pendTarget)
+
+// Extensión de las tres líneas de la operación en curso.
+//  OJO con el process_orders_on_close = true de la declaración: en la vela de
+//  entrada la orden se rellena al cierre y position_size TODAVÍA vale 0 en esa
+//  pasada. Si se cerrara solo por position_size == 0, las líneas morirían en la
+//  misma vela en que nacen. De ahí la comparación con lnBar.
+if lnVivas and array.size(lnOps) >= 3
+    int ult = array.size(lnOps) - 1
+    line.set_x2(array.get(lnOps, ult),     bar_index)
+    line.set_x2(array.get(lnOps, ult - 1), bar_index)
+    line.set_x2(array.get(lnOps, ult - 2), bar_index)
+    if strategy.position_size == 0 and bar_index != lnBar
+        lnVivas := false
 
 // El cierre forzoso manda sobre stop y objetivo. En modo 24 h se le suma el
 // horizonte máximo: lo que ocurra antes de los dos cierra la posición.
