@@ -1837,11 +1837,23 @@ if setDir != 0 and confBar and not na(atr)
             //  (tipScore) y la etiqueta de acción: desaparecerían justo en la
             //  última vela, donde sí se miran. Purgando nosotros las señales
             //  viejas, el cupo no se alcanza y los pools sobreviven.
+            //  Tres líneas, cada una con una cosa: qué y cuándo, los niveles, y
+            //  el tamaño. La hora es la de CIERRE de la vela de señal en hora
+            //  de Madrid, con time_close: la de apertura confundiría, porque la
+            //  decisión se toma al cerrar.
+            string hhmm = str.format_time(time_close, "HH:mm", "Europe/Madrid")
+            string txtSig = (isLong ? "COMPRA " : "VENTA ") + hhmm + "\n" +
+                 "E " + str.tostring(entry,  format.mintick) +
+                 "  SL " + str.tostring(stop,   format.mintick) +
+                 "  TP " + str.tostring(target, format.mintick) + "\n" +
+                 str.tostring(qty) + "c · " +
+                 str.tostring(math.round(qty * riskPts * f_pointValue)) + " $"
+
             if i_showSig
                 array.push(lblSenales, label.new(
                      x         = bar_index,
                      y         = isLong ? low - atr * 0.7 : high + atr * 0.7,
-                     text      = isLong ? "COMPRA" : "VENTA",
+                     text      = txtSig,
                      color     = isLong ? color.new(color.green, 0) : color.new(color.red, 0),
                      textcolor = color.white,
                      style     = isLong ? label.style_label_up : label.style_label_down,
