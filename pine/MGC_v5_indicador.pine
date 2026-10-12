@@ -160,7 +160,15 @@ bool  conf  = barstate.isconfirmed
 
 // VWAP de sesión y apertura diaria: los dos votos de contexto del sesgo.
 float vwapSes = ta.vwap(hlc3)
-float aperDia = request.security(syminfo.tickerid, "1D", open, lookahead = barmerge.lookahead_off)
+//  Apertura diaria del propio gráfico (v5.1 §3). Antes se pedía al diario con
+//  `open` SIN desplazar, que es la única combinación que de verdad mira al
+//  futuro si se le pone lookahead_on, y con lookahead_off llegaba con el
+//  desfase del resto. Aquí no hace falta ninguna de las dos: la apertura del
+//  día es el `open` de la primera vela del día en el marco del gráfico, que se
+//  conoce en el momento y no viene de ningún sitio.
+var float aperDia = na
+if timeframe.change("1D")
+    aperDia := open
 [pdh, pdl]    = request.security(syminfo.tickerid, "1D", [high[1], low[1]],
      lookahead = barmerge.lookahead_on)
 
