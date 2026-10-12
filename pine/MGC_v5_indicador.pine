@@ -964,11 +964,11 @@ if i_verPanel and barstate.islast
 // Avisos que no pueden pasar desapercibidos.
 var label lbAviso = na
 if barstate.islast
-    string av = ""
-    if not tfOk
-        av := "Cárgalo en 1m o 5m: en otra temporalidad el gatillo no aplica"
-    else if esSpot and i_basis == 0
-        av := "Gráfico SPOT sin base: los precios no son de MGC"
+    //  Queda UN solo aviso, el de temporalidad (v5.1 §4). El de gráfico spot
+    //  sin base se ha eliminado por completo. El input 'Base futuros − spot' se
+    //  mantiene y sigue convirtiendo los precios del panel cuando vale algo
+    //  distinto de 0: lo que desaparece es el cartel, no la función.
+    string av = tfOk ? "" : "Cárgalo en 1m o 5m: en otra temporalidad el gatillo no aplica"
     if av != ""
         if na(lbAviso)
             lbAviso := label.new(bar_index, close, "", style = label.style_label_left,
