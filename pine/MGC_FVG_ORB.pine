@@ -627,6 +627,32 @@ float rangoHoy  = na(dayHi) or na(dayLo) ? na : dayHi - dayLo
 float pctAdrHoy = na(adr20) or adr20 <= 0 or na(rangoHoy) ? na : rangoHoy / adr20 * 100.0
 bool  adrAgotado = not na(pctAdrHoy) and pctAdrHoy >= i_pctAdr
 
+// --- HOD y LOD · extremos del DÍA DE TRADING (v2.7 §1a) ---------------------
+//  BUG CORREGIDO. Lo que el gráfico rotulaba como "máximo de sesión" era el
+//  extremo de la VENTANA, no del día: con 'Ventana NY' sessHigh solo mira
+//  09:30-13:00 ET, así que un máximo hecho de madrugada no aparecía nunca.
+//  HOD y LOD se miden desde las 18:00 ET en los TRES modos horarios.
+//
+//  Se calculan aparte de dayHi/dayLo a propósito. Esos dos siguen la definición
+//  de día del modo activo y alimentan el ADR, que sí es una decisión de
+//  trading; tocarlos movería la lista de operaciones. En modo 24 h, que es el
+//  defecto, cmeKey y dayKey coinciden y HOD/LOD valen exactamente lo mismo que
+//  dayHi/dayLo: el cambio solo se nota en los modos de ventana.
+int cmeShift = time + 6 * 60 * 60 * 1000
+int cmeKey   = year(cmeShift, "America/New_York") * 10000 +
+     month(cmeShift, "America/New_York") * 100 + dayofmonth(cmeShift, "America/New_York")
+var int   lastCmeKey = na
+bool nuevoCme = na(lastCmeKey) or cmeKey != lastCmeKey
+var float hod = na
+var float lod = na
+if nuevoCme
+    lastCmeKey := cmeKey
+    hod := high
+    lod := low
+else
+    hod := math.max(nz(hod, high), high)
+    lod := math.min(nz(lod, low),  low)
+
 // --- Contexto DXY, solo lectura (§4.5) --------------------------------------
 //  No entra en ninguna decisión. Está para que la medición diga si merece la
 //  pena convertirlo en filtro.
@@ -2144,8 +2170,10 @@ plot(i_showLvls ? pdh : na, "Máx. día anterior",
 plot(i_showLvls ? pdl : na, "Mín. día anterior",
      color = i_soloAlta ? color.new(color.gray, 45) : color.new(color.blue, 30),
      style = plot.style_linebr, linewidth = i_soloAlta ? 1 : 2)
-plot(verExtras and i_showLvls and inSession ? sessHigh : na, "Máx. sesión",     color = color.new(color.purple, 40), style = plot.style_stepline)
-plot(verExtras and i_showLvls and inSession ? sessLow  : na, "Mín. sesión",     color = color.new(color.purple, 40), style = plot.style_stepline)
+// HOD y LOD, no los extremos de la ventana: ver §1a. No se condicionan a
+// inSession porque el día de trading no se interrumpe cuando la ventana cierra.
+plot(verExtras and i_showLvls ? hod : na, "HOD", color = color.new(color.purple, 40), style = plot.style_stepline)
+plot(verExtras and i_showLvls ? lod : na, "LOD", color = color.new(color.purple, 40), style = plot.style_stepline)
 plot(verExtras and i_showLvls and inSession ? sessOpen : na, "Apertura sesión", color = color.new(color.gray,   40), style = plot.style_stepline)
 
 bgcolor(verExtras and inSession ? color.new(color.blue, 94) : na, title = "Ventana de operativa")
@@ -2194,8 +2222,8 @@ if barstate.islast and array.size(lnRedondos) == 4
 //  Una etiqueta por nivel, creada una vez y movida solo en la última vela.
 var label lbPdh  = na
 var label lbPdl  = na
-var label lbSsH  = na
-var label lbSsL  = na
+var label lbHod  = na
+var label lbLod  = na
 var label lbSsO  = na
 var label lbVwap = na
 
@@ -2216,9 +2244,9 @@ if barstate.islast
              color = color.new(color.gray, 100), textcolor = chart.fg_color, size = size.small)
         lbPdl  := label.new(bar_index + 3, close, "", style = label.style_label_left,
              color = color.new(color.gray, 100), textcolor = chart.fg_color, size = size.small)
-        lbSsH  := label.new(bar_index + 3, close, "", style = label.style_label_left,
+        lbHod  := label.new(bar_index + 3, close, "", style = label.style_label_left,
              color = color.new(color.gray, 100), textcolor = chart.fg_color, size = size.small)
-        lbSsL  := label.new(bar_index + 3, close, "", style = label.style_label_left,
+        lbLod  := label.new(bar_index + 3, close, "", style = label.style_label_left,
              color = color.new(color.gray, 100), textcolor = chart.fg_color, size = size.small)
         lbSsO  := label.new(bar_index + 3, close, "", style = label.style_label_left,
              color = color.new(color.gray, 100), textcolor = chart.fg_color, size = size.small)
@@ -2228,15 +2256,15 @@ if barstate.islast
     if verEtiq
         f_moverEtiq(lbPdh,  pdh,      "PDH "  + str.tostring(pdh,      format.mintick), color.new(color.blue,   0))
         f_moverEtiq(lbPdl,  pdl,      "PDL "  + str.tostring(pdl,      format.mintick), color.new(color.blue,   0))
-        f_moverEtiq(lbSsH,  sessHigh, "SesH " + str.tostring(sessHigh, format.mintick), color.new(color.purple, 0))
-        f_moverEtiq(lbSsL,  sessLow,  "SesL " + str.tostring(sessLow,  format.mintick), color.new(color.purple, 0))
+        f_moverEtiq(lbHod,  hod,      "HOD "  + str.tostring(hod,      format.mintick), color.new(color.purple, 0))
+        f_moverEtiq(lbLod,  lod,      "LOD "  + str.tostring(lod,      format.mintick), color.new(color.purple, 0))
         f_moverEtiq(lbSsO,  sessOpen, "Open " + str.tostring(sessOpen, format.mintick), color.new(color.gray,  20))
         f_moverEtiq(lbVwap, vwap,     "VWAP " + str.tostring(vwap,     format.mintick), color.new(color.orange, 0))
     else
         f_moverEtiq(lbPdh,  na, "", chart.fg_color)
         f_moverEtiq(lbPdl,  na, "", chart.fg_color)
-        f_moverEtiq(lbSsH,  na, "", chart.fg_color)
-        f_moverEtiq(lbSsL,  na, "", chart.fg_color)
+        f_moverEtiq(lbHod,  na, "", chart.fg_color)
+        f_moverEtiq(lbLod,  na, "", chart.fg_color)
         f_moverEtiq(lbSsO,  na, "", chart.fg_color)
         f_moverEtiq(lbVwap, na, "", chart.fg_color)
 
