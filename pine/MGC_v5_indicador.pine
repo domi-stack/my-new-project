@@ -38,9 +38,21 @@
 //  SIN REPINTADO
 // -----------------------------------------------------------------------------
 //  Todas las decisiones se toman con barstate.isconfirmed. request.security usa
-//  lookahead_off Y expresiones desplazadas [1], o sea que solo lee velas ya
-//  cerradas del marco superior. Cuesta una vela de marco superior de retardo y
-//  a cambio histórico y tiempo real coinciden.
+//  lookahead_on Y expresiones desplazadas [1], que es el idioma que NO
+//  repinta: devuelve el valor de la vela superior YA CERRADA y hace coincidir
+//  histórico y tiempo real.
+//
+//  lookahead_off con expresión desplazada parece más prudente y no lo es: en
+//  tiempo real entrega el dato cuando el marco superior cierra, pero en el
+//  histórico lo entrega una vela superior más tarde, así que las dos series no
+//  son la misma. El par correcto es lookahead_on + [1]; lookahead_on a secas,
+//  sin desplazar, sí sería mirar al futuro.
+//
+//  `time` es la excepción: dentro de un lookahead_on puede ir sin desplazar,
+//  porque la hora de apertura de la vela superior en formación se conoce al
+//  empezarla y no adelanta ningún precio. Es justo lo que hace falta para
+//  detectar que ha empezado una vela superior nueva y leer entonces la
+//  anterior, ya cerrada.
 //
 //  El gatillo de 1m solo existe cuando el GRÁFICO es de 1m. Pedir 1m desde un
 //  gráfico de 5m devuelve únicamente la última vela de 1m contenida en la de
@@ -136,8 +148,13 @@ string tfSetup = "5"
 // Spot o futuros: cambia el tratamiento del volumen y activa la conversión.
 bool esSpot = not (str.startswith(syminfo.ticker, "MGC") or str.startswith(syminfo.ticker, "GC"))
 
+//  Este no estaba en la lista de la v5.1 §2, pero cumple su criterio: lleva la
+//  expresión desplazada [1]. Y tiene que cambiar con los demás, porque tfSetup
+//  es "5" y en un gráfico de 1m es un marco superior: dejarlo en lookahead_off
+//  mantendría justo el desfase que §2 viene a quitar, y encima en el ATR, que
+//  alimenta la anchura mínima del FVG y el score.
 float atr5 = request.security(syminfo.tickerid, tfSetup, ta.atr(i_atrLen)[1],
-     lookahead = barmerge.lookahead_off)
+     lookahead = barmerge.lookahead_on)
 float atr   = nz(atr5, ta.atr(i_atrLen))
 bool  conf  = barstate.isconfirmed
 
@@ -145,7 +162,7 @@ bool  conf  = barstate.isconfirmed
 float vwapSes = ta.vwap(hlc3)
 float aperDia = request.security(syminfo.tickerid, "1D", open, lookahead = barmerge.lookahead_off)
 [pdh, pdl]    = request.security(syminfo.tickerid, "1D", [high[1], low[1]],
-     lookahead = barmerge.lookahead_off)
+     lookahead = barmerge.lookahead_on)
 
 // =============================================================================
 //  3 · PERCENTIL DE ATR POR SESIÓN · filtro de chop
@@ -217,8 +234,9 @@ f_estructura(int pl, int pr, bool shift) =>
             b := -1
     [shift ? nz(b[1], 0) : b, shift ? sh1[1] : sh1, shift ? sl1[1] : sl1]
 
+//  shift = true, o sea que los tres valores que devuelve salen desplazados.
 [bEstrRaw, swHiE, swLoE] = request.security(syminfo.tickerid, i_tfEstr,
-     f_estructura(i_pivL, i_pivR, true), lookahead = barmerge.lookahead_off)
+     f_estructura(i_pivL, i_pivR, true), lookahead = barmerge.lookahead_on)
 int bEstr = nz(bEstrRaw)
 
 // Estructura y CHoCH en el marco de setup, para el requisito de contra tendencia.
@@ -282,12 +300,15 @@ f_fvgHtf(int atrLen, float minMult) =>
     bool  be = high[1] < low[3]  and (low[3] - high[1]) >= minMult * a
     [time, bu, low[1], high[3], be, low[3], high[1]]
 
+//  Las tres devuelven todo desplazado: low[1], high[3], low[3], high[1] y el
+//  ATR[1] de dentro de f_fvgHtf. Lo único sin desplazar es `time`, que es la
+//  excepción permitida y la que dispara nuevo15 / nuevo60 / nuevoDd.
 [t15, bu15, bu15T, bu15B, be15, be15T, be15B] = request.security(syminfo.tickerid, "15",
-     f_fvgHtf(i_atrLen, i_fvgMin), lookahead = barmerge.lookahead_off)
+     f_fvgHtf(i_atrLen, i_fvgMin), lookahead = barmerge.lookahead_on)
 [t60, bu60, bu60T, bu60B, be60, be60T, be60B] = request.security(syminfo.tickerid, "60",
-     f_fvgHtf(i_atrLen, i_fvgMin), lookahead = barmerge.lookahead_off)
+     f_fvgHtf(i_atrLen, i_fvgMin), lookahead = barmerge.lookahead_on)
 [tD,  buD,  buDT,  buDB,  beD,  beDT,  beDB]  = request.security(syminfo.tickerid, "1D",
-     f_fvgHtf(i_atrLen, i_fvgMin), lookahead = barmerge.lookahead_off)
+     f_fvgHtf(i_atrLen, i_fvgMin), lookahead = barmerge.lookahead_on)
 
 //  Las series con estado interno se calculan SIEMPRE en ámbito global: meter un
 //  ta.change o un ta.sma dentro de un bloque condicional lo evalúa de forma
