@@ -814,17 +814,25 @@ else if not na(sL)
 else if not na(sS)
     vivo := sS
 
-bool hayVigilar = false
-int  vigDir = 0
-if na(vivo) and not na(atr)
-    [ziL, zdL] = f_zonaCerca(1)
-    [ziS, zdS] = f_zonaCerca(-1)
-    if ziL >= 0 and zdL <= 0.5 * atr
-        hayVigilar := true
-        vigDir := 1
-    else if ziS >= 0 and zdS <= 0.5 * atr
-        hayVigilar := true
-        vigDir := -1
+//  VIGILAR solo al cierre (v5.1 §1). Antes se recalculaba en cada tick, así que
+//  el círculo aparecía y desaparecía a mitad de vela según el precio entrara y
+//  saliera del medio ATR. Con `var` el valor solo se toca cuando la vela se
+//  confirma: durante la vela en curso se ve la decisión del cierre anterior, y
+//  cambia una sola vez, al cerrar.
+var bool hayVigilar = false
+var int  vigDir     = 0
+if conf
+    hayVigilar := false
+    vigDir     := 0
+    if na(vivo) and not na(atr)
+        [ziL, zdL] = f_zonaCerca(1)
+        [ziS, zdS] = f_zonaCerca(-1)
+        if ziL >= 0 and zdL <= 0.5 * atr
+            hayVigilar := true
+            vigDir     := 1
+        else if ziS >= 0 and zdS <= 0.5 * atr
+            hayVigilar := true
+            vigDir     := -1
 
 //  El punto de VIGILAR se tiñe por dirección: gris verdoso si la zona cercana
 //  es de demanda, rojizo si es de oferta. Sigue siendo un punto pequeño.
