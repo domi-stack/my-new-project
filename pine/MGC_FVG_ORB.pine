@@ -863,6 +863,7 @@ type Zona
     bool   elegida    // llegó a destacarse alguna vez en modo limpio
     int    rendTier   // tier ya renderizado, para no restilar sin cambio
     int    rendEst    // estado ya renderizado
+    int    rendFill   // -1 sin renderizar · 0 solo contorno · 1 con relleno
 
 var array<Zona> zones = array.new<Zona>()
 
@@ -883,6 +884,11 @@ type Operacion
     bool   forzado      // cerrada por cierre forzoso u horizonte
 
 var array<Operacion> ops = array.new<Operacion>()
+
+// Tope de velas que cualquier dibujo puede proyectar a la derecha de la última
+// vela (v2.7 §2). Una caja que se extiende sin tope aleja el eje de precio y
+// deja el precio apretado contra el borde izquierdo.
+const int X_DER = 5
 
 // --- Aspecto de las zonas ---------------------------------------------------
 //  Verde = zona de COMPRA (soporte), rojo = zona de VENTA (resistencia).
@@ -934,7 +940,7 @@ f_addZone(float top, float bot, int dir, string tfName, int prio, float tfAtr) =
                      ceBar = -1, bornBar = bar_index, tNace = time, liqPrevia = f_liqPrevia(dir),
                      esSB = false, sbSwing = na,
                      score = 0, tier = 0, scoreTxt = "", bx = na, visible = true,
-                     elegida = false, rendTier = -1, rendEst = -1)
+                     elegida = false, rendTier = -1, rendEst = -1, rendFill = -1)
     if i_showBoxes
         z.bx := box.new(bar_index, top, bar_index, bot,
              border_color = f_zoneBorder(dir, 0),
@@ -1117,8 +1123,14 @@ if barstate.isconfirmed and array.size(zones) > 0
         // La caja refresca color, borde y rótulo: la dirección puede haber
         // cambiado por inversión y el estado por mitigación.
         if not na(z.bx)
+            // Tope de extensión a la derecha (v2.7 §2). bar_index + 1 ya está
+            // dentro del tope por construcción; el math.min lo deja escrito
+            // como regla en vez de como coincidencia, para que no se pierda si
+            // alguien cambia el borde derecho. Todo lo demás que se dibuja a la
+            // derecha (etiquetas de nivel, líneas de CE, números redondos) está
+            // en bar_index + 3, también dentro del tope.
             if z.state <= 1
-                box.set_right(z.bx, bar_index + 1)
+                box.set_right(z.bx, math.min(bar_index + 1, last_bar_index + X_DER))
             box.set_bgcolor(z.bx, f_zoneColor(z.dir, z.state))
             box.set_border_color(z.bx, f_zoneBorder(z.dir, z.state))
             if i_zoneText
@@ -1305,6 +1317,20 @@ f_atenuarZona(Zona z) =>
         box.set_border_width(z.bx, 1)
         box.set_text(z.bx, "")
 
+// Zona viva que NO es la activa más cercana de su lado: contorno de 1 px y
+// nada más (v2.7 §2). El relleno es lo que satura el gráfico cuando hay seis
+// zonas a la vista, y es también lo que hace que todas parezcan igual de
+// importantes. Sin relleno la zona sigue ahí y sigue leyéndose, pero no compite
+// con la que de verdad está en juego. El desglose sigue en el tooltip.
+f_contornoZona(Zona z) =>
+    if not na(z.bx)
+        color col = z.state >= 2 ? color.gray : (z.dir == 1 ? color.green : color.red)
+        box.set_bgcolor(z.bx, color.new(col, 100))
+        box.set_border_color(z.bx, color.new(col, z.state >= 2 ? 70 : 35))
+        box.set_border_width(z.bx, 1)
+        box.set_border_style(z.bx, z.state >= 2 ? line.style_dashed : line.style_solid)
+        box.set_text(z.bx, "")
+
 f_destacarZona(Zona z) =>
     if not na(z.bx)
         color col = z.dir == 1 ? color.green : color.red
@@ -1414,12 +1440,20 @@ if i_soloAlta and barstate.isconfirmed and array.size(zones) > 0
 
 else if barstate.isconfirmed and array.size(zones) > 0
     int tipSlot = 0
-    // --- Modo normal (v2 §1.1 a §1.3) ---------------------------------------
-    //  Tres reglas: fuera del radio de ATR no se dibuja, las consumidas se
-    //  ocultan salvo que se pidan, y el número de zonas de 5m por lado se
-    //  recorta. Las de 1H y 4H dentro del radio se muestran siempre, porque son
-    //  las que mandan en la jerarquía.
-    for i = 0 to array.size(zones) - 1
+    int nZon    = array.size(zones)
+    // --- Modo normal (v2 §1.1 a §1.3, ampliado en v2.7 §2) ------------------
+    //  Cinco reglas, en este orden:
+    //   1. fuera del radio de ATR no se dibuja
+    //   2. las consumidas se ocultan salvo que se pidan
+    //   3. de las de 5m solo se conservan las más cercanas por lado
+    //   4. si dos zonas visibles se solapan, manda la de marco mayor
+    //   5. solo la activa más cercana de cada lado lleva relleno
+    //  Las de 1H y 4H dentro del radio se muestran siempre, porque son las que
+    //  mandan en la jerarquía.
+    array<bool> ver = array.new_bool(nZon, false)
+
+    // --- Reglas 1 a 3
+    for i = 0 to nZon - 1
         Zona z = array.get(zones, i)
         float dz      = math.abs(z.mid - close)
         float dATR    = na(atr) ? 1e12 : dz / atr
@@ -1431,7 +1465,7 @@ else if barstate.isconfirmed and array.size(zones) > 0
         // cercanas: se cuenta cuántas de 5m del mismo lado están más cerca.
         if mostrar and z.prio == 1
             int masCerca = 0
-            for j = 0 to array.size(zones) - 1
+            for j = 0 to nZon - 1
                 if j != i
                     Zona w = array.get(zones, j)
                     if w.prio == 1 and w.state <= 1
@@ -1441,14 +1475,64 @@ else if barstate.isconfirmed and array.size(zones) > 0
                         if mismoLado and wCerca and dw < dz
                             masCerca += 1
             mostrar := masCerca < i_maxVisLado
+        array.set(ver, i, mostrar)
 
-        // Restilar solo si cambió el tier o el estado (§2.2); mostrar u ocultar
-        // se aplica siempre, porque depende de la distancia y cambia cada vela.
-        if mostrar
-            if z.rendTier != z.tier or z.rendEst != z.state or not z.visible
-                f_restaurarZona(z)
+    // --- Regla 4 · solape
+    //  Dos zonas se solapan si sus bandas se cruzan. Gana la de marco mayor y,
+    //  a igualdad de marco, la de índice menor, que es la más antigua: la que
+    //  el usuario ya tenía dibujada.
+    //  Se lee de una COPIA del paso anterior, no del array que se está
+    //  modificando. Si no, una zona que acaba de perder su solape dejaría de
+    //  tapar a la siguiente y el resultado dependería del orden del recorrido.
+    array<bool> ver0 = array.copy(ver)
+    for i = 0 to nZon - 1
+        if array.get(ver0, i)
+            Zona z = array.get(zones, i)
+            for j = 0 to nZon - 1
+                if j != i and array.get(ver0, j)
+                    Zona w = array.get(zones, j)
+                    bool solapan = z.bot <= w.top and w.bot <= z.top
+                    bool pierde  = w.prio > z.prio or (w.prio == z.prio and j < i)
+                    if solapan and pierde
+                        array.set(ver, i, false)
+
+    // --- Regla 5 · quién lleva relleno
+    //  Solo la zona ACTIVA (viva y sin disparar) más cercana por encima y la
+    //  más cercana por debajo. Una zona consumida nunca lleva relleno, aunque
+    //  sea la más cercana: ya no se puede operar.
+    int   fillUp = -1
+    int   fillDn = -1
+    float dUp    = 1e12
+    float dDn    = 1e12
+    for i = 0 to nZon - 1
+        if array.get(ver, i)
+            Zona z = array.get(zones, i)
+            if z.state <= 1 and not z.fired
+                float d = math.abs(z.mid - close)
+                if z.mid > close and d < dUp
+                    fillUp := i
+                    dUp    := d
+                if z.mid <= close and d < dDn
+                    fillDn := i
+                    dDn    := d
+
+    // --- Aplicación
+    //  Restilar solo si cambió el tier, el estado o el modo de relleno (§2.2);
+    //  mostrar u ocultar se aplica siempre, porque depende de la distancia y
+    //  cambia en cada vela.
+    for i = 0 to nZon - 1
+        Zona z = array.get(zones, i)
+        if array.get(ver, i)
+            int quiero = (i == fillUp or i == fillDn) ? 1 : 0
+            if z.rendTier != z.tier or z.rendEst != z.state or
+                 z.rendFill != quiero or not z.visible
+                if quiero == 1
+                    f_restaurarZona(z)
+                else
+                    f_contornoZona(z)
                 z.rendTier := z.tier
                 z.rendEst  := z.state
+                z.rendFill := quiero
             z.visible := true
             // El desglose del score viaja en el tooltip de una label invisible.
             if tipSlot < array.size(tipScore)
@@ -1459,7 +1543,8 @@ else if barstate.isconfirmed and array.size(zones) > 0
         else
             if z.visible
                 f_ocultarZona(z)
-                z.visible := false
+                z.visible  := false
+                z.rendFill := -1
         array.set(zones, i, z)
 
     // Las labels de tooltip no usadas se llevan fuera de la vista.
