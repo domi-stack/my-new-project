@@ -1,6 +1,6 @@
 //@version=6
 // =============================================================================
-//  MGC · FVG + Estructura · v5.0 · INDICADOR
+//  MGC · FVG + Estructura · v5.1 · INDICADOR
 // =============================================================================
 //  Para COMEX:MGC1! en 1m o 5m. Opera 24 h: no hay ventanas horarias, ni cupo
 //  diario, ni límite de pérdidas, ni bloqueos por noticias. La única puerta de
