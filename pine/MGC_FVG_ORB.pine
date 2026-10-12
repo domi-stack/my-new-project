@@ -296,6 +296,11 @@ i_logDesde  = input.time(timestamp("2026-09-15T00:00:00"), "Log desde", group = 
      tooltip = "Un solo día por pasada. El panel de Pine Logs tiene un límite de líneas y un rango amplio lo desborda, dejando fuera " +
                "precisamente los días que se quieren comparar. Para los tres días de la prueba, tres pasadas y tres ficheros.")
 i_logHasta  = input.time(timestamp("2026-09-15T23:59:00"), "Log hasta", group = G_LOG)
+i_logOps    = input.bool(false, "Exportar operaciones cerradas a Pine Logs", group = G_LOG,
+     tooltip = "Una línea por operación cerrada, con la estrategia que la originó. Es el \"exportable a CSV\" de la tabla por " +
+               "estrategia: Pine no puede escribir ficheros, así que se copia el panel de Pine Logs y se pega en un .csv.\n\n" +
+               "Da el detalle operación a operación, no solo el agregado, así que permite recalcular cualquier métrica fuera del " +
+               "script. El rango de fechas de arriba NO le aplica: se exportan todas.")
 
 // --- Medición (v2 §5) --------------------------------------------------------
 const string G_MED = "Medición"
@@ -875,6 +880,11 @@ var array<Zona> zones = array.new<Zona>()
 //  strategy.closedtrades sirve de índice aquí. El riesgo planificado se guarda
 //  AL ENTRAR y no se recalcula: R = PnL / riesgo planificado.
 type Operacion
+    //  La estrategia que originó la señal, y que tiene que sobrevivir hasta el
+    //  cierre: sin ella un resultado global positivo puede venir de una sola
+    //  fuente mientras las demás pierden, y no habría forma de saberlo.
+    //  "FVG" para todo lo anterior a la v2.8; "S1".."S4" para las nuevas.
+    string estrategia
     string disparador   // FVG5 · FVG1H · FVG4H · SWP · SB · ASIA
     int    tier         // tier de la zona en el momento de la entrada
     float  riesgoUSD    // riesgo planificado, en USD
@@ -1942,6 +1952,9 @@ f_reason(bool isLong, string head) =>
 //  misma vela.
 int    setDir  = 0
 string setKind = ""
+//  Familia de la que viene el candidato. Hasta la v2.8 solo existía una, así
+//  que el valor por defecto reproduce exactamente lo anterior.
+string setEstr = "FVG"
 if not na(pick)
     setDir  := pick.dir
     setKind := "FVG"
@@ -2089,7 +2102,8 @@ if setDir != 0 and confBar and not na(atr)
 
             // Registro de la operación: el riesgo planificado se guarda aquí y
             // no se recalcula después, para que R sea PnL / riesgo real.
-            array.push(ops, Operacion.new(disparador = trigId, tier = trigTier,
+            array.push(ops, Operacion.new(estrategia = setEstr, disparador = trigId,
+                 tier = trigTier,
                  riesgoUSD = qty * riskPts * f_pointValue, stopPts = riskPts,
                  entryBar = bar_index, entryTime = time, forzado = false))
 
@@ -2198,15 +2212,39 @@ if strategy.position_size != 0 and (forceOut or porHorizonte)
 
 // Resultado del día en R. Se acumula al cerrarse cada operación usando el
 // riesgo PLANIFICADO que se guardó al entrar, no uno recalculado.
+// Cabecera del CSV, una sola vez, para que el pegado en la hoja de cálculo
+// tenga nombres de columna y no haya que adivinar el orden.
+if i_logOps and barstate.isfirst
+    log.info("O,entrada_ET,salida_ET,estrategia,disparador,tier,dir,precio_ent,precio_sal," +
+         "stop_pts,riesgo_usd,pnl_usd,R,forzado")
+
 if strategy.closedtrades > nz(strategy.closedtrades[1], 0)
     int ci = strategy.closedtrades - 1
     if ci >= 0 and ci < array.size(ops)
-        float riesgoPlan = array.get(ops, ci).riesgoUSD
+        Operacion oc = array.get(ops, ci)
+        float riesgoPlan = oc.riesgoUSD
         if riesgoPlan > 0
             rHoy += strategy.closedtrades.profit(ci) / riesgoPlan
         // Contadores del freno y del enfriamiento.
         if strategy.closedtrades.profit(ci) < 0
             perdHoy += 1
+        // --- Registro O: una línea por operación cerrada (v2.8) -------------
+        //  El "exportable a CSV" de la tabla por estrategia. Solo escribe: no
+        //  entra en ninguna decisión, igual que el exportador de zonas.
+        if i_logOps
+            float pnlC = strategy.closedtrades.profit(ci)
+            log.info("O,{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12}",
+                 str.format_time(oc.entryTime, "yyyy-MM-dd HH:mm", "America/New_York"),
+                 str.format_time(strategy.closedtrades.exit_time(ci), "yyyy-MM-dd HH:mm", "America/New_York"),
+                 oc.estrategia, oc.disparador, oc.tier,
+                 strategy.closedtrades.size(ci) > 0 ? 1 : -1,
+                 str.tostring(strategy.closedtrades.entry_price(ci), format.mintick),
+                 str.tostring(strategy.closedtrades.exit_price(ci),  format.mintick),
+                 str.tostring(oc.stopPts,  "#.##"),
+                 str.tostring(riesgoPlan,  "#.##"),
+                 str.tostring(pnlC,        "#.##"),
+                 riesgoPlan > 0 ? str.tostring(pnlC / riesgoPlan, "#.###") : "",
+                 oc.forzado ? 1 : 0)
     ultSalidaBar := bar_index
 
 // =============================================================================
@@ -2684,23 +2722,27 @@ f_pctl(array<float> a, float p) =>
 //  siguen siendo 40 para el signo y 100 para la magnitud, y por eso las filas
 //  entre 30 y 40 salen en gris.
 const int N_MIN_MUESTRA = 30
-const int N_RES = 12
+//  14 grupos: 6 disparadores de FVG/barrido + 4 estrategias nuevas + 3 tiers +
+//  total. S5 no tiene grupo porque es un filtro, no un sistema: no origina
+//  ninguna operación propia.
+const int N_GRUPOS = 14
+const int N_RES = 16
 var table res = table.new(position.bottom_right, 7, N_RES, border_width = 1,
      frame_width = 1, frame_color = color.new(color.gray, 40))
 
 if i_verResultados and verExtras and barstate.islast
-    // 6 disparadores + 3 tiers + total = 10 grupos
     array<string> gNom = array.from("FVG5", "FVG1H", "FVG4H", "SWP", "SB", "ASIA",
+         "S1 barrido", "S2 pullback", "S3 fade", "S4 noticias",
          "FUERTE", "MEDIA", "débil", "TOTAL")
-    array<int>   gN   = array.new_int(10, 0)
-    array<int>   gWin = array.new_int(10, 0)
-    array<float> gR   = array.new_float(10, 0.0)
-    array<float> gPos = array.new_float(10, 0.0)
-    array<float> gNeg = array.new_float(10, 0.0)
-    array<int>   gFz  = array.new_int(10, 0)
-    array<float> gDD  = array.new_float(10, 0.0)
-    array<float> gEq  = array.new_float(10, 0.0)
-    array<float> gPk  = array.new_float(10, 0.0)
+    array<int>   gN   = array.new_int(N_GRUPOS, 0)
+    array<int>   gWin = array.new_int(N_GRUPOS, 0)
+    array<float> gR   = array.new_float(N_GRUPOS, 0.0)
+    array<float> gPos = array.new_float(N_GRUPOS, 0.0)
+    array<float> gNeg = array.new_float(N_GRUPOS, 0.0)
+    array<int>   gFz  = array.new_int(N_GRUPOS, 0)
+    array<float> gDD  = array.new_float(N_GRUPOS, 0.0)
+    array<float> gEq  = array.new_float(N_GRUPOS, 0.0)
+    array<float> gPk  = array.new_float(N_GRUPOS, 0.0)
 
     for ti = 0 to strategy.closedtrades - 1
         if ti < array.size(ops)
@@ -2711,9 +2753,11 @@ if i_verResultados and verExtras and barstate.islast
                 // índice del disparador y del tier
                 int di = o.disparador == "FVG5" ? 0 : o.disparador == "FVG1H" ? 1 :
                      o.disparador == "FVG4H" ? 2 : o.disparador == "SWP" ? 3 :
-                     o.disparador == "SB" ? 4 : 5
-                int tiIdx = o.tier == 2 ? 6 : o.tier == 1 ? 7 : 8
-                for gi in array.from(di, tiIdx, 9)
+                     o.disparador == "SB" ? 4 : o.disparador == "ASIA" ? 5 :
+                     o.disparador == "S1" ? 6 : o.disparador == "S2" ? 7 :
+                     o.disparador == "S3" ? 8 : 9
+                int tiIdx = o.tier == 2 ? 10 : o.tier == 1 ? 11 : 12
+                for gi in array.from(di, tiIdx, 13)
                     array.set(gN,  gi, array.get(gN, gi) + 1)
                     array.set(gR,  gi, array.get(gR, gi) + rr)
                     if rr > 0
@@ -2742,7 +2786,7 @@ if i_verResultados and verExtras and barstate.islast
     // muestra NI porcentaje NI R: un 60 % sobre ocho operaciones no es un 60 %,
     // y ponerlo en una tabla invita a creérselo. Solo se declara la muestra.
     int row = 0
-    for gi = 0 to 9
+    for gi = 0 to N_GRUPOS - 1
         int n = array.get(gN, gi)
         if n > 0
             row += 1
