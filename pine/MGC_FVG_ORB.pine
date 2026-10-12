@@ -2587,15 +2587,37 @@ if barstate.islast
 f_biasTxt(int b) => b ==  1 ? "alcista" : b == -1 ? "bajista" : "rango"
 f_biasCol(int b) => b ==  1 ? color.new(color.teal, 0) : b == -1 ? color.new(color.maroon, 0) : color.new(color.gray, 0)
 
-var table diag = table.new(position.top_right, 2, 18, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50))
+const int N_DIAG = 18
+var table diag = table.new(position.top_right, 2, N_DIAG, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50))
+
+// Escribe una fila y devuelve la siguiente libre. Si no hay dato, no escribe y
+// devuelve la misma: así la fila no deja un hueco en blanco (v2.7 §5). Una fila
+// vacía en una tabla de Pine sigue ocupando alto, de modo que "ocultar" es
+// necesariamente "no escribir y correr las de abajo".
+//  "ninguno" NO cuenta como falta de dato: que ningún veto bloquee es
+//  información, y de las importantes.
+f_filaDiag(int r, string k, string v, color c) =>
+    bool hay = v != "" and v != "—" and v != "NaN"
+    if hay
+        table.cell(diag, 0, r, k, text_size = size.small)
+        table.cell(diag, 1, r, v, text_color = c, text_size = size.small)
+    hay ? r + 1 : r
 
 // =============================================================================
 //  10b · TABLA REDUCIDA · modo solo alta probabilidad (v2.1 §3.1.5)
 // =============================================================================
 //  Cinco filas y nada más. El estado de acción viene de la capa de §8b: no se
 //  recalcula aquí, para que la tabla y la etiqueta digan siempre lo mismo.
-var table limpia = table.new(position.top_right, 2, 5, border_width = 1,
+const int N_LIMPIA = 5
+var table limpia = table.new(position.top_right, 2, N_LIMPIA, border_width = 1,
      frame_width = 1, frame_color = color.new(color.gray, 40))
+
+f_filaLimpia(int r, string k, string v, color c) =>
+    bool hay = v != "" and v != "—"
+    if hay
+        table.cell(limpia, 0, r, k, text_size = size.small)
+        table.cell(limpia, 1, r, v, text_color = c, text_size = size.small)
+    hay ? r + 1 : r
 
 if i_soloAlta and barstate.islast
     // Zona más cercana de las que el modo deja ver.
@@ -2622,21 +2644,18 @@ if i_soloAlta and barstate.islast
     table.cell(limpia, 1, 0, accSub, text_color = color.white, bgcolor = accCol,
          text_size = size.small, text_halign = text.align_left)
 
-    table.cell(limpia, 0, 1, "Zona más cercana", text_size = size.small)
-    table.cell(limpia, 1, 1, zTxt, text_size = size.small,
-         text_color = zDir == 1 ? color.new(color.green, 0) : zDir == -1 ? color.new(color.red, 0) : chart.fg_color)
+    int rl = 1
+    rl := f_filaLimpia(rl, "Zona más cercana", zTxt,
+         zDir == 1 ? color.new(color.green, 0) : zDir == -1 ? color.new(color.red, 0) : chart.fg_color)
 
     // El freno aparece aquí y no en una fila propia: lo que necesitas saber es
     // "hoy ya no se opera", y eso pertenece a la fila del día.
     bool frenado = f_frenoActivo()
-    table.cell(limpia, 0, 2, "Hoy", text_size = size.small)
-    table.cell(limpia, 1, 2, str.tostring(tradesToday) + " / " + str.tostring(i_maxTrades) +
+    rl := f_filaLimpia(rl, "Hoy", str.tostring(tradesToday) + " / " + str.tostring(i_maxTrades) +
          " · " + str.tostring(rHoy, "+#.##") + "R" + (frenado ? " · FRENO" : ""),
-         text_size = size.small,
-         text_color = frenado ? color.new(color.orange, 0) : chart.fg_color)
+         frenado ? color.new(color.orange, 0) : chart.fg_color)
 
-    table.cell(limpia, 0, 3, "Calibración", text_size = size.small)
-    table.cell(limpia, 1, 3, CAL_TXT, text_size = size.small, text_color = color.new(color.orange, 0))
+    rl := f_filaLimpia(rl, "Calibración", CAL_TXT, color.new(color.orange, 0))
 
     // §3.4 · aviso de precios spot
     table.cell(limpia, 0, 4, esSpot ? "AVISO" : "", text_size = size.small,
@@ -2663,7 +2682,13 @@ f_pctl(array<float> a, float p) =>
         r := array.get(c, idx)
     r
 
-var table res = table.new(position.bottom_right, 7, 12, border_width = 1,
+//  N_MIN_MUESTRA es el suelo por debajo del cual la tabla NO publica cifras.
+//  30 es lo que pide la v2.7. No es el umbral de "ya se puede concluir": eso
+//  siguen siendo 40 para el signo y 100 para la magnitud, y por eso las filas
+//  entre 30 y 40 salen en gris.
+const int N_MIN_MUESTRA = 30
+const int N_RES = 12
+var table res = table.new(position.bottom_right, 7, N_RES, border_width = 1,
      frame_width = 1, frame_color = color.new(color.gray, 40))
 
 if i_verResultados and verExtras and barstate.islast
@@ -2716,28 +2741,42 @@ if i_verResultados and verExtras and barstate.islast
     table.cell(res, 5, 0, "DD R",   text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
     table.cell(res, 6, 0, "% forz", text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
 
+    // §5 · Un grupo sin operaciones no ocupa fila, y por debajo de 30 no se
+    // muestra NI porcentaje NI R: un 60 % sobre ocho operaciones no es un 60 %,
+    // y ponerlo en una tabla invita a creérselo. Solo se declara la muestra.
+    int row = 0
     for gi = 0 to 9
         int n = array.get(gN, gi)
-        int row = gi + 1
-        // Una fila con n < 40 no basta para concluir: se marca en gris.
-        color fg = n >= 40 ? chart.fg_color : color.new(color.gray, 35)
-        table.cell(res, 0, row, array.get(gNom, gi), text_size = size.small, text_color = fg)
-        table.cell(res, 1, row, str.tostring(n), text_size = size.small, text_color = fg)
         if n > 0
-            float er = array.get(gR, gi) / n
-            float pf = array.get(gNeg, gi) > 0 ? array.get(gPos, gi) / array.get(gNeg, gi) : na
-            table.cell(res, 2, row, str.tostring(100.0 * array.get(gWin, gi) / n, "#") + "%", text_size = size.small, text_color = fg)
-            table.cell(res, 3, row, str.tostring(er, "+#.##"), text_size = size.small,
-                 text_color = n >= 40 ? (er >= 0.15 ? color.new(color.green, 0) : er <= 0 ? color.new(color.red, 0) : fg) : fg)
-            table.cell(res, 4, row, na(pf) ? "—" : str.tostring(pf, "#.##"), text_size = size.small, text_color = fg)
-            table.cell(res, 5, row, str.tostring(array.get(gDD, gi), "#.##"), text_size = size.small, text_color = fg)
-            table.cell(res, 6, row, str.tostring(100.0 * array.get(gFz, gi) / n, "#") + "%", text_size = size.small, text_color = fg)
-        else
-            for cc = 2 to 6
-                table.cell(res, cc, row, "—", text_size = size.small, text_color = fg)
+            row += 1
+            color fg = n >= 40 ? chart.fg_color : color.new(color.gray, 35)
+            table.cell(res, 0, row, array.get(gNom, gi), text_size = size.small, text_color = fg)
+            if n < N_MIN_MUESTRA
+                table.cell(res, 1, row, "muestra insuficiente (n=" + str.tostring(n) + ")",
+                     text_size = size.small, text_color = color.new(color.orange, 0))
+                for cc = 2 to 6
+                    table.cell(res, cc, row, "", text_size = size.small, text_color = fg)
+            else
+                float er = array.get(gR, gi) / n
+                float pf = array.get(gNeg, gi) > 0 ? array.get(gPos, gi) / array.get(gNeg, gi) : na
+                table.cell(res, 1, row, str.tostring(n), text_size = size.small, text_color = fg)
+                table.cell(res, 2, row, str.tostring(100.0 * array.get(gWin, gi) / n, "#") + "%", text_size = size.small, text_color = fg)
+                table.cell(res, 3, row, str.tostring(er, "+#.##"), text_size = size.small,
+                     text_color = n >= 40 ? (er >= 0.15 ? color.new(color.green, 0) : er <= 0 ? color.new(color.red, 0) : fg) : fg)
+                table.cell(res, 4, row, na(pf) ? "—" : str.tostring(pf, "#.##"), text_size = size.small, text_color = fg)
+                table.cell(res, 5, row, str.tostring(array.get(gDD, gi), "#.##"), text_size = size.small, text_color = fg)
+                table.cell(res, 6, row, str.tostring(100.0 * array.get(gFz, gi) / n, "#") + "%", text_size = size.small, text_color = fg)
 
-    table.cell(res, 0, 11, "n<40 en gris: muestra insuficiente para concluir",
-         text_size = size.tiny, text_color = color.new(color.gray, 25))
+    int pie = row + 1
+    if pie <= N_RES - 1
+        table.cell(res, 0, pie, "n<" + str.tostring(N_MIN_MUESTRA) + ": sin cifras · n<40 en gris: no concluyente",
+             text_size = size.tiny, text_color = color.new(color.gray, 25))
+        for cc = 1 to 6
+            table.cell(res, cc, pie, "", text_size = size.tiny)
+    // Filas que esta pasada no ha usado: la tabla es `var` y lo escrito antes
+    // seguiría a la vista.
+    if pie + 1 <= N_RES - 1
+        table.clear(res, 0, pie + 1, 6, N_RES - 1)
 
 if i_showTable and verExtras and barstate.islast
     float upLvl = na
@@ -2766,29 +2805,22 @@ if i_showTable and verExtras and barstate.islast
     table.cell(diag, 0, 0, "MGC · diagnóstico", text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
     table.cell(diag, 1, 0, i_mtfMode,           text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
 
-    table.cell(diag, 0, 1, "Sesgo 5m", text_size = size.small)
-    table.cell(diag, 1, 1, f_biasTxt(bias5),  text_color = f_biasCol(bias5),  text_size = size.small)
-    table.cell(diag, 0, 2, "Sesgo 1H", text_size = size.small)
-    table.cell(diag, 1, 2, f_biasTxt(bias1h), text_color = f_biasCol(bias1h), text_size = size.small)
-    table.cell(diag, 0, 3, "Sesgo 4H", text_size = size.small)
-    table.cell(diag, 1, 3, f_biasTxt(bias4h), text_color = f_biasCol(bias4h), text_size = size.small)
+    int r = 1
+    r := f_filaDiag(r, "Sesgo 5m", f_biasTxt(bias5),  f_biasCol(bias5))
+    r := f_filaDiag(r, "Sesgo 1H", f_biasTxt(bias1h), f_biasCol(bias1h))
+    r := f_filaDiag(r, "Sesgo 4H", f_biasTxt(bias4h), f_biasCol(bias4h))
 
-    table.cell(diag, 0, 4, "FVG arriba", text_size = size.small)
-    table.cell(diag, 1, 4, upTxt, text_size = size.small)
-    table.cell(diag, 0, 5, "FVG abajo",  text_size = size.small)
-    table.cell(diag, 1, 5, dnTxt, text_size = size.small)
+    r := f_filaDiag(r, "FVG arriba", upTxt, chart.fg_color)
+    r := f_filaDiag(r, "FVG abajo",  dnTxt, chart.fg_color)
 
-    table.cell(diag, 0, 6, "ATR(" + str.tostring(i_atrLen) + ")", text_size = size.small)
-    table.cell(diag, 1, 6, str.tostring(atr, "#.##") + " pts", text_size = size.small)
+    r := f_filaDiag(r, "ATR(" + str.tostring(i_atrLen) + ")",
+         na(atr) ? "" : str.tostring(atr, "#.##") + " pts", chart.fg_color)
 
-    table.cell(diag, 0, 7, "Operaciones hoy", text_size = size.small)
-    table.cell(diag, 1, 7, str.tostring(tradesToday) + " / " + str.tostring(i_maxTrades), text_size = size.small)
-
-    table.cell(diag, 0, 8, "Ventana", text_size = size.small)
-    table.cell(diag, 1, 8, winTxt, text_color = winCol, text_size = size.small)
-
-    table.cell(diag, 0, 9, "Zonas activas", text_size = size.small)
-    table.cell(diag, 1, 9, str.tostring(nAct) + " de " + str.tostring(array.size(zones)), text_size = size.small)
+    r := f_filaDiag(r, "Operaciones hoy",
+         str.tostring(tradesToday) + " / " + str.tostring(i_maxTrades), chart.fg_color)
+    r := f_filaDiag(r, "Ventana", winTxt, winCol)
+    r := f_filaDiag(r, "Zonas activas",
+         str.tostring(nAct) + " de " + str.tostring(array.size(zones)), chart.fg_color)
 
     // Diagnóstico de escasez de señales. La fila EXCLUSIVO es la que informa:
     // cuenta los setups que ese veto bloqueó ÉL SOLO, o sea las operaciones que
@@ -2804,15 +2836,10 @@ if i_showTable and verExtras and barstate.islast
         if b > 0
             vBloq += (vBloq == "" ? "" : " · ") + f_vetoName(idx) + " " + str.tostring(b)
 
-    table.cell(diag, 0, 10, "Setups vistos", text_size = size.small)
-    table.cell(diag, 1, 10, str.tostring(nSetups) + "  ->  " +
-         str.tostring(strategy.closedtrades + strategy.opentrades) + " operados", text_size = size.small)
-
-    table.cell(diag, 0, 11, "Veto EXCLUSIVO", text_size = size.small)
-    table.cell(diag, 1, 11, vExcl == "" ? "ninguno" : vExcl, text_size = size.small)
-
-    table.cell(diag, 0, 12, "Veto (bloquea)", text_size = size.small)
-    table.cell(diag, 1, 12, vBloq == "" ? "ninguno" : vBloq, text_size = size.small)
+    r := f_filaDiag(r, "Setups vistos", str.tostring(nSetups) + "  ->  " +
+         str.tostring(strategy.closedtrades + strategy.opentrades) + " operados", chart.fg_color)
+    r := f_filaDiag(r, "Veto EXCLUSIVO", vExcl == "" ? "ninguno" : vExcl, chart.fg_color)
+    r := f_filaDiag(r, "Veto (bloquea)",  vBloq == "" ? "ninguno" : vBloq, chart.fg_color)
 
     // §5.3 · El dato que decide si el techo de puntos es el cuello de botella:
     // mediana y percentil 80 del stop estructural de TODOS los setups vistos,
@@ -2833,25 +2860,22 @@ if i_showTable and verExtras and barstate.islast
 
     float atrMedio = array.size(atrSes) > 0 ? array.avg(atrSes) : na
 
-    table.cell(diag, 0, 13, "Stop med/p80", text_size = size.small)
-    table.cell(diag, 1, 13, stTxt == "" ? "—" : stTxt + "  pts", text_size = size.small)
-
-    table.cell(diag, 0, 14, "ATR 20 sesiones", text_size = size.small)
-    table.cell(diag, 1, 14, na(atrMedio) ? "—" : str.tostring(atrMedio, "#.##") + " pts · techo " +
-         str.tostring(i_maxStopPts, "#") + " pts", text_size = size.small)
+    r := f_filaDiag(r, "Stop med/p80", stTxt == "" ? "" : stTxt + "  pts", chart.fg_color)
+    r := f_filaDiag(r, "ATR 20 sesiones", na(atrMedio) ? "" :
+         str.tostring(atrMedio, "#.##") + " pts · techo " + str.tostring(i_maxStopPts, "#") + " pts",
+         chart.fg_color)
 
     // §4.3 y §4.5 · contexto que no decide nada: ADR consumido y dirección DXY.
-    table.cell(diag, 0, 15, "ADR hoy", text_size = size.small)
-    table.cell(diag, 1, 15, na(pctAdrHoy) ? "—" : str.tostring(pctAdrHoy, "#") + "% del ADR(20)" +
+    r := f_filaDiag(r, "ADR hoy", na(pctAdrHoy) ? "" : str.tostring(pctAdrHoy, "#") + "% del ADR(20)" +
          (i_vetoAdr ? " · veto a " + str.tostring(i_pctAdr, "#") + "%" : " · veto apagado"),
-         text_size = size.small)
+         chart.fg_color)
 
     // Perfil horario: media de la hora en curso frente a la media de todas, con
     // el umbral al lado. Es el dato con el que ajustar `i_horaMinRel` sin
     // adivinar, y el que dice por qué una hora está vetada.
     float mhAct = na(hSlot) ? na : f_mediaHora(hSlot)
     float mgAct = f_mediaGlobalHoras()
-    string hTxt = "—"
+    string hTxt = ""
     if not na(mhAct) and not na(mgAct) and mgAct > 0
         hTxt := str.tostring(hSlot) + "h ET: " + str.tostring(mhAct, "#.#") + " pts · " +
              str.tostring(mhAct / mgAct, "#.##") + "x media (umbral " +
@@ -2860,12 +2884,14 @@ if i_showTable and verExtras and barstate.islast
     else if not na(hSlot)
         hTxt := str.tostring(hSlot) + "h ET: muestra " + str.tostring(array.get(horaN, hSlot)) +
              "/" + str.tostring(i_horaMinN) + ", sin vetar"
-    table.cell(diag, 0, 16, "Perfil horario", text_size = size.small)
-    table.cell(diag, 1, 16, hTxt, text_size = size.small,
-         text_color = f_horaDebil() ? color.new(color.orange, 0) : chart.fg_color)
+    r := f_filaDiag(r, "Perfil horario", hTxt,
+         f_horaDebil() ? color.new(color.orange, 0) : chart.fg_color)
 
-    table.cell(diag, 0, 17, "DXY 1H", text_size = size.small)
-    table.cell(diag, 1, 17, not i_verDxy ? "—" :
+    r := f_filaDiag(r, "DXY 1H", not i_verDxy ? "" :
          dxyDir == 1 ? "alcista (sobre EMA20)" : dxyDir == -1 ? "bajista (bajo EMA20)" : "plano",
-         text_size = size.small,
-         text_color = dxyDir == 0 ? chart.fg_color : color.new(color.gray, 20))
+         dxyDir == 0 ? chart.fg_color : color.new(color.gray, 20))
+
+    // Las filas que esta pasada no ha usado se borran: la tabla es `var` y una
+    // celda escrita en una vela anterior seguiría ahí.
+    if r <= N_DIAG - 1
+        table.clear(diag, 0, r, 1, N_DIAG - 1)
