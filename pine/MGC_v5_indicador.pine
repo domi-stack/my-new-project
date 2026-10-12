@@ -123,7 +123,6 @@ i_verCajas = input.bool(true, "Cajas de riesgo y beneficio", group = G_VIS)
 i_transp   = input.int(85, "Transparencia de las cajas", minval = 70, maxval = 95, group = G_VIS,
      tooltip = "Nunca por debajo de 70: las velas tienen que verse siempre.")
 i_verPanel = input.bool(true, "Mostrar panel", group = G_VIS)
-i_verCalib = input.bool(true, "Mostrar calibración en el panel", group = G_VIS)
 
 // --- Riesgo ------------------------------------------------------------------
 const string G_RSK = "Riesgo"
@@ -882,7 +881,13 @@ plot(i_minimal ? na : vwapSes, "VWAP", color = color.new(color.blue, 30), linewi
 // =============================================================================
 //  12 · PANEL · una sola tabla
 // =============================================================================
-var table pnl = table.new(position.top_right, 2, 12, border_width = 1,
+//  Diez filas: las dos de calibración se han retirado (v5.1 §5). El panel es
+//  para decidir ahora, y "n=14 · 57% · +0,12R" invita a creerse una ventaja que
+//  con esa muestra no está medida. Las arrays de calibración SIGUEN estando,
+//  porque las usa 'Desactivar setups con esperanza negativa': lo que se quita
+//  es publicar la cifra, no medirla.
+const int N_PNL = 10
+var table pnl = table.new(position.top_right, 2, N_PNL, border_width = 1,
      frame_width = 1, frame_color = color.new(color.gray, 50))
 
 f_fila(int r, string k, string v, color cv) =>
@@ -936,30 +941,11 @@ if i_verPanel and barstate.islast
          str.tostring(bar_index - (vivo.estado == 3 ? vivo.barDisparo : vivo.barArmado)) + " velas",
          color.new(color.gray, 10))
 
-    // Calibración: N siempre al lado de la cifra, para no creérsela antes de hora.
     f_fila(9, "Nivel ↑ / ↓",
          (nomArriba == "" ? "—" : nomArriba + " " + str.tostring(nivArriba, format.mintick)) +
          "  ·  " + (nomAbajo == "" ? "—" : nomAbajo + " " + str.tostring(nivAbajo, format.mintick)),
          color.new(color.gray, 10))
 
-    if i_verCalib
-        [eT, nT] = f_expectativa(-1, -1, -1)
-        int gan = 0
-        if array.size(calR) > 0
-            for i = 0 to array.size(calR) - 1
-                if array.get(calR, i) > 0
-                    gan += 1
-        f_fila(10, "Calib. total", nT == 0 ? "sin datos" :
-             "n=" + str.tostring(nT) + " · " + str.tostring(100.0 * gan / nT, "#") + "% · " +
-             str.tostring(eT, "+#.##") + "R",
-             nT < 30 ? color.new(color.gray, 40) :
-             eT > 0 ? color.new(color.green, 0) : color.new(color.red, 0))
-        [eN, nN] = f_expectativa(-1, -1, 2)
-        [eA, nA] = f_expectativa(-1, -1, 0)
-        f_fila(11, "NY / Asia",
-             "n=" + str.tostring(nN) + " " + (na(eN) ? "—" : str.tostring(eN, "+#.#") + "R") +
-             "  ·  n=" + str.tostring(nA) + " " + (na(eA) ? "—" : str.tostring(eA, "+#.#") + "R"),
-             color.new(color.gray, 20))
 
 // Avisos que no pueden pasar desapercibidos.
 var label lbAviso = na
