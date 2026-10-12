@@ -1,6 +1,6 @@
 //@version=6
 // =============================================================================
-//  MGC · FVG + Estructura · v5.1 · INDICADOR
+//  MGC · FVG + Estructura · v5.2 · INDICADOR
 // =============================================================================
 //  Para COMEX:MGC1! en 1m o 5m. Opera 24 h: no hay ventanas horarias, ni cupo
 //  diario, ni límite de pérdidas, ni bloqueos por noticias. La única puerta de
@@ -60,7 +60,7 @@
 //  5m. En 5m el gatillo es de 5m.
 // =============================================================================
 
-indicator("MGC · FVG + Estructura v5.0", shorttitle = "MGC v5.0", overlay = true,
+indicator("MGC · FVG + Estructura v5.2", shorttitle = "MGC v5.2", overlay = true,
      max_lines_count = 500, max_boxes_count = 500, max_labels_count = 500)
 
 // =============================================================================
@@ -123,6 +123,10 @@ i_verCajas = input.bool(true, "Cajas de riesgo y beneficio", group = G_VIS)
 i_transp   = input.int(85, "Transparencia de las cajas", minval = 70, maxval = 95, group = G_VIS,
      tooltip = "Nunca por debajo de 70: las velas tienen que verse siempre.")
 i_verPanel = input.bool(true, "Mostrar panel", group = G_VIS)
+i_verHist  = input.bool(true, "Dejar en el gráfico los disparos cerrados", group = G_VIS,
+     tooltip = "Los dibujos de un disparo que ya cerró no se borran: se cortan en la vela del cierre y se quedan, con el resultado " +
+               "escrito en la etiqueta. Eso convierte el gráfico en el registro de lo que el indicador dijo y en qué acabó.\n\n" +
+               "Apágalo si prefieres el gráfico limpio: entonces los dibujos se borran al cerrar, como hasta la v5.1.")
 
 // --- Riesgo ------------------------------------------------------------------
 const string G_RSK = "Riesgo"
@@ -736,6 +740,7 @@ f_colScore(int s)  => s >= 65 ? color.new(color.green, 0) :
 //  gestionar y solo ensucian.
 
 type Setup
+    int    uid        // identificador propio: sL/sS se reasignan, esto no
     int    dir
     int    estado     // 1 vigilar · 2 armado · 3 disparo · 4 invalidado
     float  entrada
@@ -755,9 +760,19 @@ type Setup
     box    bxR
     box    bxB
     label  lbSig
+    string txt        // texto de la etiqueta, para poder añadirle el resultado
+    string ctx        // "zona <tf> · barrido <nombre>", fijado al ARMAR
 
 var Setup sL = na
 var Setup sS = na
+
+//  §C1 y §C2 · sL y sS son "el setup vivo de cada dirección" y se reasignan en
+//  cada ARMADO. Eso valía mientras un disparo se cerrara antes del siguiente
+//  armado, y no es el caso: un disparo puede tardar decenas de velas en tocar
+//  TP1 o SL. `abiertos` guarda los disparos cuyo resultado está por medirse, y
+//  `uid` permite saber si sL/sS siguen apuntando a uno de ellos.
+var int uidSeq = 0
+var array<Setup> abiertos = array.new<Setup>()
 
 f_borrarDibujos(Setup s) =>
     if not na(s)
@@ -773,6 +788,45 @@ f_borrarDibujos(Setup s) =>
             box.delete(s.bxB)
         if not na(s.lbSig)
             label.delete(s.lbSig)
+
+// --- Histórico de disparos cerrados (§C6) -----------------------------------
+//  Cada tipo de objeto lleva su propia cola porque sus cupos son distintos:
+//  120 etiquetas, 240 cajas y 330 líneas son 120 disparos con una etiqueta, dos
+//  cajas y tres líneas cada uno, y dejan margen por debajo de los 500 de la
+//  declaración para las zonas, los niveles y el setup vivo. Al pasarse se borra
+//  el más antiguo, nunca el más reciente.
+var array<label> histLb = array.new<label>()
+var array<box>   histBx = array.new<box>()
+var array<line>  histLn = array.new<line>()
+
+f_archivar(Setup s, string res) =>
+    if not i_verHist
+        f_borrarDibujos(s)
+    else
+        if not na(s.lbSig)
+            label.set_text(s.lbSig, s.txt + "\n" + res)
+            array.push(histLb, s.lbSig)
+        if not na(s.bxR)
+            box.set_right(s.bxR, bar_index)
+            array.push(histBx, s.bxR)
+        if not na(s.bxB)
+            box.set_right(s.bxB, bar_index)
+            array.push(histBx, s.bxB)
+        if not na(s.lnE)
+            line.set_x2(s.lnE, bar_index)
+            array.push(histLn, s.lnE)
+        if not na(s.lnS)
+            line.set_x2(s.lnS, bar_index)
+            array.push(histLn, s.lnS)
+        if not na(s.lnT)
+            line.set_x2(s.lnT, bar_index)
+            array.push(histLn, s.lnT)
+        while array.size(histLb) > 120
+            label.delete(array.shift(histLb))
+        while array.size(histBx) > 240
+            box.delete(array.shift(histBx))
+        while array.size(histLn) > 330
+            line.delete(array.shift(histLn))
 
 //  TP1 = siguiente nivel de liquidez opuesto. TP2 = siguiente zona HTF más
 //  allá. Si no hay TP1, no hay R:R y el setup no puede disparar: eso es
@@ -866,14 +920,20 @@ if conf and tfOk and not na(atr)
             bool ctrOk  = (not contra) or (zonaCerca and hayBarrido and (esL ? chochUp : chochDn))
 
             if ctrOk
-                // Sustituye al anterior de la misma dirección.
-                if not na(act)
+                //  §C3 · solo se borran los dibujos del anterior si sigue en
+                //  ARMADO. Si ya disparó, su resultado está por medirse y sus
+                //  dibujos SON el histórico: vive en `abiertos` y lo archivará
+                //  el seguimiento cuando cierre. Borrarlos aquí era perder la
+                //  mitad de los disparos del gráfico sin saber en qué acabaron.
+                if not na(act) and act.estado == 2
                     f_borrarDibujos(act)
-                Setup ns = Setup.new(dir = dir, estado = 2, entrada = entrada, sl = sl,
-                     tp1 = t1, tp2 = t2, rr = rr, score = sc, detalle = det,
+                uidSeq += 1
+                Setup ns = Setup.new(uid = uidSeq, dir = dir, estado = 2, entrada = entrada,
+                     sl = sl, tp1 = t1, tp2 = t2, rr = rr, score = sc, detalle = det,
                      barArmado = bar_index, barDisparo = -1, contra = contra,
                      sesion = sesIdx, lnE = na, lnS = na, lnT = na, bxR = na, bxB = na,
-                     lbSig = na)
+                     lbSig = na, txt = "",
+                     ctx = "zona " + zc.tf + " · barrido " + (esL ? barrUpNom : barrDnNom))
                 color c = esL ? color.green : color.red
                 ns.lnE := line.new(bar_index, entrada, bar_index + 10, entrada,
                      color = color.new(color.gray, 20), style = line.style_dashed, width = 1)
@@ -899,9 +959,22 @@ if conf and tfOk and not na(atr)
                  (not na(barrDnLo) and close < barrDnLo)
             bool confirma = engulf or rompe
 
+            //  §C4 · la entrada real es el cierre de ESTA vela, no el de la
+            //  vela del ARMADO. Entre una y otra puede haber varias velas, así
+            //  que el R:R calculado al armar ya no describe la operación que se
+            //  abriría: casi siempre es mejor que el real, porque el precio ha
+            //  avanzado hacia el objetivo. Se recalcula y se filtra con el
+            //  real. `ladoOk` cubre el caso en que el precio ya se haya pasado
+            //  del SL: entonces no hay R:R y no hay disparo.
+            float entReal = close
+            bool  ladoOk  = esL ? entReal > act.sl : entReal < act.sl
+            float riesgoR = math.abs(entReal - act.sl)
+            float rrReal  = ladoOk and riesgoR > 0 and not na(act.tp1) ?
+                 math.abs(act.tp1 - entReal) / riesgoR : na
+
             int umbral = act.contra ? i_umbralCtr : i_umbral
             bool okScore = act.score >= umbral and act.score >= 40
-            bool okRR    = not na(act.rr) and act.rr >= i_rrMin
+            bool okRR    = not na(rrReal) and rrReal >= i_rrMin
 
             // El filtro de chop no impide VIGILAR ni ARMADO, solo DISPARAR.
             bool okChop = not esChop
@@ -915,6 +988,13 @@ if conf and tfOk and not na(atr)
             if confirma and okScore and okRR and okChop and okAuto
                 act.estado     := 3
                 act.barDisparo := bar_index
+                act.entrada    := entReal
+                act.rr         := rrReal
+                //  La línea de entrada se mueve al precio real: dejarla en el
+                //  del armado dibujaría una operación que no es la que se abre.
+                if not na(act.lnE)
+                    line.set_y1(act.lnE, entReal)
+                    line.set_y2(act.lnE, entReal)
                 // Cajas tipo herramienta de posición.
                 if i_verCajas and not i_minimal
                     act.bxR := box.new(bar_index, act.entrada, bar_index + 12, act.sl,
@@ -924,16 +1004,25 @@ if conf and tfOk and not na(atr)
                         act.bxB := box.new(bar_index, act.entrada, bar_index + 12, act.tp1,
                              border_color = color.new(color.green, 60),
                              bgcolor = color.new(color.green, i_transp))
-                // Etiqueta de UNA línea, que es lo que hay que leer de un vistazo.
-                string txt = (esL ? "LONG " : "SHORT ") +
+                //  §C7 · dos líneas. La primera es la operación y es la que
+                //  se lee de un vistazo. La segunda es el POR QUÉ: cómo están
+                //  los tres marcos y de qué zona y qué barrido sale el setup.
+                //  Sin ella, dos disparos idénticos en precio son
+                //  indistinguibles al revisar el gráfico un mes después.
+                string l1 = (esL ? "LONG " : "SHORT ") +
                      str.tostring(act.entrada, format.mintick) +
                      " | SL " + str.tostring(act.sl, format.mintick) +
                      (na(act.tp1) ? "" : " | TP1 " + str.tostring(act.tp1, format.mintick)) +
                      " | " + str.tostring(act.rr, "#.#") + "R"
+                act.txt   := l1 + "\n" + ctxCorto + " · " + act.ctx
                 act.lbSig := label.new(bar_index, esL ? low - 0.8 * atr : high + 0.8 * atr,
-                     txt, style = esL ? label.style_label_up : label.style_label_down,
+                     act.txt, style = esL ? label.style_label_up : label.style_label_down,
                      color = esL ? color.new(color.green, 0) : color.new(color.red, 0),
                      textcolor = color.white, size = size.normal)
+                //  §C2 · a la cola de abiertos. Es una referencia al mismo
+                //  objeto que sL/sS, así que lo que se mute por un lado se ve
+                //  por el otro.
+                array.push(abiertos, act)
                 if esL
                     sL := act
                     disparoL := true
@@ -941,28 +1030,65 @@ if conf and tfOk and not na(atr)
                     sS := act
                     disparoS := true
 
-        // --- Resultado del disparo, para la calibración
-        if not na(act) and act.estado == 3
-            bool toco1 = not na(act.tp1) and (esL ? high >= act.tp1 : low <= act.tp1)
-            bool tocoS = esL ? low <= act.sl : high >= act.sl
-            bool caduc = bar_index - act.barDisparo > i_velasInval * 3
-            if toco1 or tocoS or caduc
-                float r = tocoS ? -1.0 : toco1 ? math.abs(act.tp1 - act.entrada) /
-                     math.max(math.abs(act.entrada - act.sl), 0.01) : 0.0
+
+// --- Seguimiento del resultado de los disparos abiertos (§C2, §C5) ----------
+//  Fuera del bucle por dirección a propósito. Dentro solo se podía seguir el
+//  setup al que sL/sS apuntaba en ese momento, así que un ARMADO nuevo en la
+//  misma dirección dejaba al anterior sin medir y sin archivar: desaparecía de
+//  la calibración sin dejar rastro. Ahora cada disparo vive en `abiertos` hasta
+//  que cierra, y puede haber varios a la vez en el mismo sentido.
+//
+//  Se recorre de atrás hacia delante porque se borra dentro del bucle: al
+//  quitar el índice i, los de arriba bajan una posición, y yendo hacia atrás ya
+//  están visitados.
+if conf and tfOk and array.size(abiertos) > 0
+    for i = array.size(abiertos) - 1 to 0
+        Setup s  = array.get(abiertos, i)
+        bool  esL = s.dir == 1
+        //  §C5 · nunca en la vela del disparo. La entrada es su cierre, así que
+        //  medir las mechas de esa misma vela sería contar movimiento anterior
+        //  a la entrada, y en una vela de desplazamiento eso regala un TP1 o
+        //  inventa un SL que nadie tocó estando dentro.
+        if bar_index > s.barDisparo
+            bool  toco1  = not na(s.tp1) and (esL ? high >= s.tp1 : low <= s.tp1)
+            bool  tocoS  = esL ? low <= s.sl : high >= s.sl
+            bool  caduc  = bar_index - s.barDisparo > i_velasInval * 3
+            float riesgo = math.max(math.abs(s.entrada - s.sl), 0.01)
+            float  r   = na
+            string res = ""
+            //  El SL se comprueba PRIMERO: si TP1 y SL caen en la misma vela no
+            //  se sabe cuál llegó antes, y quedarse con el bueno es mentirse en
+            //  la propia calibración. Se cuenta como SL.
+            if tocoS
+                r   := -1.0
+                res := "✘ SL −1R"
+            else if toco1
+                r   := math.abs(s.tp1 - s.entrada) / riesgo
+                res := "✔ TP1 " + str.tostring(r, "+#.#") + "R"
+            else if caduc
+                //  Caducado no es cero: es lo que valía la operación al
+                //  cerrarla a mercado.
+                r   := (esL ? close - s.entrada : s.entrada - close) / riesgo
+                res := "⌛ caducado " + str.tostring(r, "+#.#") + "R"
+            if res != ""
                 array.push(calR,   r)
-                array.push(calDir, dir)
-                array.push(calCtr, act.contra ? 1 : 0)
-                array.push(calSes, act.sesion)
+                array.push(calDir, s.dir)
+                array.push(calCtr, s.contra ? 1 : 0)
+                array.push(calSes, s.sesion)
                 while array.size(calR) > 100
                     array.shift(calR)
                     array.shift(calDir)
                     array.shift(calCtr)
                     array.shift(calSes)
-                f_borrarDibujos(act)
-                if esL
+                f_archivar(s, res)
+                //  §C6 · sL/sS solo se limpian si siguen apuntando a ESTE
+                //  setup. Si ya los ha sustituido un ARMADO posterior, ponerlos
+                //  a na borraría el setup vivo.
+                if not na(sL) and sL.uid == s.uid
                     sL := na
-                else
+                if not na(sS) and sS.uid == s.uid
                     sS := na
+                array.remove(abiertos, i)
 
 // =============================================================================
 //  11 · MARCADORES · tres niveles de atención y nada más
