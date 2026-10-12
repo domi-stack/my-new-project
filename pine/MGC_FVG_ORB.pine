@@ -388,9 +388,11 @@ i_regMinVel = input.int(12, "Velas mínimas del día antes de clasificar", minva
 //  POR DEFECTO EL COMPORTAMIENTO NO CAMBIA.
 const string G_CUP = "Reparto de cupo"
 i_prioridad = input.string("FVG primero", "Prioridad cuando varias fuentes disparan",
-     options = ["FVG primero", "Estrategias nuevas primero", "Por orden S1-S4 y luego FVG"], group = G_CUP,
+     options = ["FVG primero", "Estrategias nuevas primero", "La que menos haya operado hoy"], group = G_CUP,
      tooltip = "Solo decide quién gana cuando dos fuentes disparan en la MISMA vela. 'FVG primero' reproduce el comportamiento " +
-               "anterior a la v2.8.")
+               "anterior a la v2.8.\n\n" +
+               "'La que menos haya operado hoy' es un reparto rotatorio: evita que una sola fuente se coma el cupo todos los días, " +
+               "que es el riesgo real de tener seis. Con empate manda el FVG.")
 i_cupoS1    = input.int(0, "Cupo diario propio · S1 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP)
 i_cupoS2    = input.int(0, "Cupo diario propio · S2 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP)
 i_cupoS3    = input.int(0, "Cupo diario propio · S3 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP)
@@ -2015,6 +2017,86 @@ f_contarVetos(int m) =>
                     array.set(vetoExcl, idx, array.get(vetoExcl, idx) + 1)
 
 // =============================================================================
+//  7b · ESTRATEGIAS ADICIONALES · capa de candidatos (v2.8)
+// =============================================================================
+//  Las cinco estrategias nuevas NO reimplementan la ejecución. Cada una, cuando
+//  se cumple, deja un CANDIDATO en una lista, y el resolutor de la sección 8
+//  elige uno y lo mete por el mismo embudo de siempre: máscara de vetos,
+//  dimensionamiento, redondeo a ticks y strategy.entry.
+//
+//  Esto es deliberado y es lo que hace que la regresión se sostenga: con todas
+//  apagadas la lista de candidatos queda vacía, el resolutor devuelve el
+//  candidato heredado tal cual y no hay una sola instrucción nueva en el camino
+//  hasta la orden. También significa que las estrategias nuevas pasan por TODOS
+//  los vetos existentes, de modo que la fila de vetos exclusivos de la tabla
+//  dice cuál las está ahogando en lugar de dejarlo a la intuición.
+//
+//  TODOS LOS PARÁMETROS DE PRECIO VAN EN UNIDADES DE PRECIO (USD/oz) O EN
+//  MÚLTIPLOS DE ATR, nunca en ticks: así el mismo ajuste vale en MGC y en
+//  XAUUSD, que es el requisito del encargo.
+type Cand
+    string estr      // "S1" · "S2" · "S3" · "S4"
+    int    dir
+    float  stop      // precio del stop, ya en la rejilla de ticks
+    float  tgt        // objetivo propio; na = usar el objetivo estándar en USD
+    string motivo
+
+//  Lista del bar en curso. Es `var` y se vacía al empezar cada vela, para
+//  reutilizar el mismo objeto en vez de crear uno nuevo en cada barra.
+var array<Cand> cands = array.new<Cand>()
+array.clear(cands)
+
+f_addCand(string estr, int dir, float stop, float tgt, string motivo) =>
+    array.push(cands, Cand.new(estr = estr, dir = dir, stop = stop, tgt = tgt,
+         motivo = motivo))
+
+//  Contadores diarios por fuente. Los usan el cupo propio y el reparto
+//  rotatorio, y el de conflictos va a la tabla de diagnóstico.
+var int opsFvgDia   = 0
+var int opsS1       = 0
+var int opsS2       = 0
+var int opsS3       = 0
+var int opsS4       = 0
+var int nConflictos = 0
+if nuevoDia
+    opsFvgDia := 0
+    opsS1     := 0
+    opsS2     := 0
+    opsS3     := 0
+    opsS4     := 0
+
+//  Un cupo propio ACOTA la estrategia, no le reserva sitio: el límite diario
+//  global sigue mandando por encima. Con 0 no hay tope propio.
+f_cupoLibre(string estr) =>
+    bool ok = true
+    if estr == "S1" and i_cupoS1 > 0 and opsS1 >= i_cupoS1
+        ok := false
+    if estr == "S2" and i_cupoS2 > 0 and opsS2 >= i_cupoS2
+        ok := false
+    if estr == "S3" and i_cupoS3 > 0 and opsS3 >= i_cupoS3
+        ok := false
+    if estr == "S4" and i_cupoS4 > 0 and opsS4 >= i_cupoS4
+        ok := false
+    ok
+
+//  Rango de prioridad: menor gana. En el modo rotatorio el rango ES el número
+//  de operaciones de hoy de esa fuente multiplicado por 10, más un desempate
+//  fijo que deja al FVG delante cuando van igualadas.
+f_prioFuente(string estr) =>
+    int p = 0
+    if i_prioridad == "Estrategias nuevas primero"
+        p := estr == "FVG" ? 9 : estr == "S1" ? 0 : estr == "S2" ? 1 :
+             estr == "S3" ? 2 : 3
+    else if i_prioridad == "La que menos haya operado hoy"
+        p := estr == "FVG" ? opsFvgDia * 10 : estr == "S1" ? opsS1 * 10 + 1 :
+             estr == "S2" ? opsS2 * 10 + 2 : estr == "S3" ? opsS3 * 10 + 3 :
+             opsS4 * 10 + 4
+    else
+        p := estr == "FVG" ? 0 : estr == "S1" ? 1 : estr == "S2" ? 2 :
+             estr == "S3" ? 3 : 4
+    p
+
+// =============================================================================
 //  8 · CONSTRUCCIÓN Y EJECUCIÓN DE LA OPERACIÓN
 // =============================================================================
 
@@ -2050,25 +2132,74 @@ f_reason(bool isLong, string head) =>
         s += ", BOS"
     s
 
-// --- Detección del setup ----------------------------------------------------
+// --- Candidato heredado: FVG o barrido --------------------------------------
 //  Dos disparadores independientes. El FVG en su 50% tiene prioridad porque su
 //  nivel es más preciso; el barrido entra cuando no hay FVG disparando en la
 //  misma vela.
-int    setDir  = 0
-string setKind = ""
-//  Familia de la que viene el candidato. Hasta la v2.8 solo existía una, así
-//  que el valor por defecto reproduce exactamente lo anterior.
-string setEstr = "FVG"
+int    legDir  = 0
+string legKind = ""
 if not na(pick)
-    setDir  := pick.dir
-    setKind := "FVG"
+    legDir  := pick.dir
+    legKind := "FVG"
 else if (i_useSweep or i_useAsia) and confBar
     if sweepBull
-        setDir  := 1
-        setKind := "Barrido"
+        legDir  := 1
+        legKind := "Barrido"
     else if sweepBear
-        setDir  := -1
-        setKind := "Barrido"
+        legDir  := -1
+        legKind := "Barrido"
+
+// --- Resolución entre fuentes (conflictos 3 y 4) ----------------------------
+//  Qué fuente se lleva la vela. Con todas las estrategias nuevas apagadas no
+//  hay candidatos, el bucle no se ejecuta y el resultado es legDir/legKind tal
+//  cual: exactamente el comportamiento anterior a la v2.8.
+int    setDir  = 0
+string setKind = ""
+string setEstr = "FVG"
+float  setStop = na    // stop propio del candidato nuevo; na = lo pone §8
+float  setTgt  = na    // objetivo propio; na = el objetivo estándar en USD
+string setMot  = ""
+
+//  Conflicto 4 · direcciones presentes entre las fuentes ELEGIBLES, contando
+//  también el candidato heredado: si el FVG compra y S3 vende, el desacuerdo es
+//  el mismo que entre dos estrategias nuevas.
+bool hayUp = legDir == 1
+bool hayDn = legDir == -1
+if array.size(cands) > 0
+    for i = 0 to array.size(cands) - 1
+        Cand c = array.get(cands, i)
+        if f_cupoLibre(c.estr)
+            if c.dir == 1
+                hayUp := true
+            else
+                hayDn := true
+
+bool conflicto = hayUp and hayDn
+if conflicto
+    nConflictos += 1
+
+//  Dos sistemas que se contradicen no es una señal débil: es ausencia de
+//  señal. Por defecto no se opera ninguna de las dos.
+if not (conflicto and i_conflicto == "No operar ninguna")
+    int mejorP = 999
+    if legDir != 0
+        mejorP  := f_prioFuente("FVG")
+        setDir  := legDir
+        setKind := legKind
+        setEstr := "FVG"
+    if array.size(cands) > 0
+        for i = 0 to array.size(cands) - 1
+            Cand c = array.get(cands, i)
+            if f_cupoLibre(c.estr)
+                int pc = f_prioFuente(c.estr)
+                if pc < mejorP
+                    mejorP  := pc
+                    setDir  := c.dir
+                    setKind := "Estrategia"
+                    setEstr := c.estr
+                    setStop := c.stop
+                    setTgt  := c.tgt
+                    setMot  := c.motivo
 
 if setDir != 0 and confBar and not na(atr)
     bool  isLong = setDir == 1
@@ -2082,12 +2213,20 @@ if setDir != 0 and confBar and not na(atr)
     //  Un SB solo cuenta como SB dentro de su ventana y una vez al día; fuera
     //  de eso la zona sigue siendo un FVG de 5m normal y se opera como tal, en
     //  lugar de perderse.
+    //  Una estrategia nueva trae su propio stop ya calculado y redondeado, así
+    //  que no entra en ninguna de las ramas de abajo. Y hay que excluirla
+    //  explícitamente de `esAsia`: sin el `not esNueva`, un candidato de S1 que
+    //  cayera en la misma vela que un barrido del rango asiático se tomaría por
+    //  un disparador ASIA y se le aplicaría el stop del otro.
+    bool esNueva = setKind == "Estrategia"
     bool esSBok = isFvg and pick.esSB and i_useSB and enSB and sbDiaHecho != dayKey
-    bool esAsia = (not isFvg) and esSweepAsia
+    bool esAsia = (not isFvg) and (not esNueva) and esSweepAsia
 
     float stop = na
     float buf  = i_stopBuf * atr
-    if esSBok
+    if esNueva
+        stop := setStop
+    else if esSBok
         // El más cercano al precio de los dos que siguen invalidando la idea:
         // el borde lejano del FVG o el swing que originó el MSS. NO la mecha
         // del barrido, que es precisamente lo que este disparador evita.
@@ -2111,7 +2250,7 @@ if setDir != 0 and confBar and not na(atr)
 
     if not na(riskPts) and riskPts > 0
         array.push(stopsVistos, riskPts)
-        array.push(stopsTrig, esSBok ? "SB" :
+        array.push(stopsTrig, esNueva ? setEstr : esSBok ? "SB" :
              isFvg ? (pick.tf == "4H" ? "FVG4H" : pick.tf == "1H" ? "FVG1H" : "FVG5") :
              esAsia ? "ASIA" : "SWP")
 
@@ -2130,8 +2269,14 @@ if setDir != 0 and confBar and not na(atr)
 
     if mask == 0
         // --- Objetivo -------------------------------------------------------
+        //  Objetivo estándar en USD, salvo que el candidato traiga uno propio
+        //  (S1 al VWAP, S3 al VWAP, S2/S4 a R fijo). El recorte por nivel del
+        //  marco mayor de abajo se aplica igual a los dos: un objetivo detrás
+        //  de una pared de 4H no es un objetivo, venga de donde venga.
         float tgtPts = i_targetUSD / (qty * f_pointValue)
         float target = isLong ? entry + tgtPts : entry - tgtPts
+        if esNueva and not na(setTgt)
+            target := setTgt
 
         // El nivel del marco mayor recorta el objetivo si queda por delante.
         // La holgura mínima ya la ha comprobado la máscara.
@@ -2149,7 +2294,9 @@ if setDir != 0 and confBar and not na(atr)
 
         // Un id por disparador, para que el Strategy Tester separe resultados.
         string trigId = ""
-        if esSBok
+        if esNueva
+            trigId := setEstr
+        else if esSBok
             trigId := "SB"
         else if isFvg
             trigId := pick.tf == "4H" ? "FVG4H" : pick.tf == "1H" ? "FVG1H" : "FVG5"
@@ -2167,7 +2314,9 @@ if setDir != 0 and confBar and not na(atr)
             // ternario porque Pine evalúa las DOS ramas de un ?: y leer un
             // campo de `pick` cuando es na (caso barrido) daría error.
             string head = ""
-            if isFvg
+            if esNueva
+                head := setMot
+            else if isFvg
                 head := "FVG " + pick.tf + (isLong ? " alcista" : " bajista") +
                      (pick.inverted ? " invertido" : "") + " al 50%"
             else
@@ -2279,6 +2428,19 @@ if setDir != 0 and confBar and not na(atr)
             if esSBok
                 sbDiaHecho := dayKey
             tradesToday += 1
+            // Contador por fuente: lo leen el cupo propio y el reparto
+            // rotatorio. Se incrementa AQUÍ, cuando la orden ya está puesta,
+            // no al generar el candidato: un candidato vetado no gasta cupo.
+            if setEstr == "S1"
+                opsS1 += 1
+            else if setEstr == "S2"
+                opsS2 += 1
+            else if setEstr == "S3"
+                opsS3 += 1
+            else if setEstr == "S4"
+                opsS4 += 1
+            else
+                opsFvgDia += 1
 
 // Refresco de la protección mientras haya posición abierta. Se dirige al id del
 // disparador que abrió la posición, no a un id fijo.
@@ -3043,6 +3205,14 @@ if i_showTable and verExtras and barstate.islast
     if velasDia < i_regMinVel
         regFila := "sin clasificar · " + str.tostring(velasDia) + "/" +
              str.tostring(i_regMinVel) + " velas"
+    //  Conflicto 4 · cuántas veces dos fuentes se contradijeron en la misma
+    //  vela. Si este número es alto, las estrategias se están estorbando y el
+    //  problema no es el umbral de ninguna.
+    r := f_filaDiag(r, "Conflictos de dirección",
+         nConflictos == 0 ? "" : str.tostring(nConflictos) + " velas · " +
+         (i_conflicto == "No operar ninguna" ? "sin operar" : "manda la prioridad"),
+         color.new(color.orange, 0))
+
     r := f_filaDiag(r, "Régimen del día", regFila,
          regimen == 1 ? color.new(color.teal, 0) :
          regimen == -1 ? color.new(color.orange, 0) : color.new(color.gray, 20))
