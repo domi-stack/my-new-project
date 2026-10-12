@@ -2400,7 +2400,68 @@ bool verOpen = not na(sessOpen) and not f_tapadoPorZona(sessOpen, P_OTRO) and
      not (verHod and f_cercaNivel(sessOpen, hod)) and not (verLod and f_cercaNivel(sessOpen, lod)) and
      not (verVwapLvl and f_cercaNivel(sessOpen, vwap))
 
-plot(verExtras and i_showVwap and inSession and verVwapLvl ? vwap : na, "VWAP sesión", color = color.new(color.orange, 0), linewidth = 2)
+// --- Tope de cuatro líneas de nivel a la vez (v2.7 §4) ----------------------
+//  De los que han pasado la regla de colisión se quedan los CUATRO más
+//  cercanos al precio, y solo si están dentro de 6 ATR. Los números redondos
+//  cuentan en el mismo presupuesto: son líneas de nivel como las demás, y si no
+//  contaran, cuatro de ellas se comerían el gráfico por su cuenta.
+const float ATR_VIS = 6.0
+const int   MAX_NIV = 4
+
+f_dATR(float y) =>
+    na(atr) or atr <= 0 or na(y) ? 1e12 : math.abs(y - close) / atr
+
+//  Inventario de candidatos del bar actual. Una función de Pine no puede
+//  asignar a una variable global, pero sí mutar un array, que es lo que hace
+//  f_addNivel.
+var array<float> nvY = array.new_float()
+var array<int>   nvP = array.new_int()
+array.clear(nvY)
+array.clear(nvP)
+
+f_addNivel(bool ok, float y, int p) =>
+    if ok and f_dATR(y) <= ATR_VIS
+        array.push(nvY, y)
+        array.push(nvP, p)
+
+// Números redondos: se calcula aquí la rejilla para que entren en el reparto.
+// §9b solo dibuja lo que esta selección deje pasar.
+float pasoRed  = str.tonumber(i_pasoRedondo)
+bool  hayPaso  = not na(pasoRed) and pasoRed > 0
+float baseRed  = hayPaso ? math.floor(close / pasoRed) * pasoRed : na
+bool  verRedOk = verExtras and i_verRedondos and hayPaso
+
+f_nivelRedondo(int k) =>
+    //  k = 0,1 por encima · k = 2,3 por debajo, igual que en §9b.
+    na(baseRed) ? na : (k <= 1 ? baseRed + pasoRed * (k + 1) : baseRed - pasoRed * (k - 2))
+
+f_addNivel(verPdh,     pdh,      P_PD)
+f_addNivel(verPdl,     pdl,      P_PD)
+f_addNivel(verHod,     hod,      P_HL)
+f_addNivel(verLod,     lod,      P_HL)
+f_addNivel(verVwapLvl, vwap,     P_VWAP)
+f_addNivel(verOpen,    sessOpen, P_OTRO)
+for k = 0 to 3
+    f_addNivel(verRedOk, f_nivelRedondo(k), P_OTRO)
+
+//  Cuenta cuántos candidatos están estrictamente por delante: más cerca, o a
+//  la misma distancia con más prioridad. Es el mismo recuento que usa el
+//  recorte de zonas de 5m, y evita que un empate en el corte deje pasar cinco
+//  líneas en vez de cuatro.
+f_nivelVisible(float y, int p) =>
+    bool  cabe = f_dATR(y) <= ATR_VIS
+    int   antes = 0
+    if cabe and array.size(nvY) > 0
+        float d = f_dATR(y)
+        for k = 0 to array.size(nvY) - 1
+            float dk = f_dATR(array.get(nvY, k))
+            int   pk = array.get(nvP, k)
+            if dk < d or (dk == d and pk > p)
+                antes += 1
+    cabe and antes < MAX_NIV
+
+plot(verExtras and i_showVwap and inSession and verVwapLvl and
+     f_nivelVisible(vwap, P_VWAP) ? vwap : na, "VWAP sesión", color = color.new(color.orange, 0), linewidth = 2)
 plot(verExtras and i_showVwap and inSession ? vwapUp : na, "VWAP +σ",     color = color.new(color.orange, 60))
 plot(verExtras and i_showVwap and inSession ? vwapDn : na, "VWAP -σ",     color = color.new(color.orange, 60))
 
@@ -2409,17 +2470,18 @@ plot(verExtras and i_showVwap and inSession ? vwapDn : na, "VWAP -σ",     color
 //  §1.5 pide PDH/PDL a 2 px y los de sesión punteados: `plot` no tiene estilo
 //  punteado, así que los de sesión quedan en stepline de 1 px, que es lo más
 //  tenue disponible sin pasarlos a objetos `line`.
-plot(i_showLvls and verPdh ? pdh : na, "Máx. día anterior",
+plot(i_showLvls and verPdh and f_nivelVisible(pdh, P_PD) ? pdh : na, "Máx. día anterior",
      color = i_soloAlta ? color.new(color.gray, 45) : color.new(color.blue, 30),
      style = plot.style_linebr, linewidth = i_soloAlta ? 1 : 2)
-plot(i_showLvls and verPdl ? pdl : na, "Mín. día anterior",
+plot(i_showLvls and verPdl and f_nivelVisible(pdl, P_PD) ? pdl : na, "Mín. día anterior",
      color = i_soloAlta ? color.new(color.gray, 45) : color.new(color.blue, 30),
      style = plot.style_linebr, linewidth = i_soloAlta ? 1 : 2)
 // HOD y LOD, no los extremos de la ventana: ver §1a. No se condicionan a
 // inSession porque el día de trading no se interrumpe cuando la ventana cierra.
-plot(verExtras and i_showLvls and verHod ? hod : na, "HOD", color = color.new(color.purple, 40), style = plot.style_stepline)
-plot(verExtras and i_showLvls and verLod ? lod : na, "LOD", color = color.new(color.purple, 40), style = plot.style_stepline)
-plot(verExtras and i_showLvls and inSession and verOpen ? sessOpen : na, "Apertura sesión", color = color.new(color.gray,   40), style = plot.style_stepline)
+plot(verExtras and i_showLvls and verHod and f_nivelVisible(hod, P_HL) ? hod : na, "HOD", color = color.new(color.purple, 40), style = plot.style_stepline)
+plot(verExtras and i_showLvls and verLod and f_nivelVisible(lod, P_HL) ? lod : na, "LOD", color = color.new(color.purple, 40), style = plot.style_stepline)
+plot(verExtras and i_showLvls and inSession and verOpen and
+     f_nivelVisible(sessOpen, P_OTRO) ? sessOpen : na, "Apertura sesión", color = color.new(color.gray, 40), style = plot.style_stepline)
 
 bgcolor(verExtras and inSession ? color.new(color.blue, 94) : na, title = "Ventana de operativa")
 
@@ -2446,15 +2508,13 @@ if barstate.isfirst
         array.push(lnRedondos, line.new(bar_index, close, bar_index, close,
              color = color.new(color.gray, 100), style = line.style_dotted, width = 1))
 
-float pasoRed = str.tonumber(i_pasoRedondo)
 if barstate.islast and array.size(lnRedondos) == 4
-    bool verRed = verExtras and i_verRedondos and not na(pasoRed) and pasoRed > 0
-    float base  = verRed ? math.floor(close / pasoRed) * pasoRed : na
     for k = 0 to 3
-        line ln = array.get(lnRedondos, k)
-        if verRed
-            // k = 0,1 por encima · k = 2,3 por debajo
-            float lvl = k <= 1 ? base + pasoRed * (k + 1) : base - pasoRed * (k - 2)
+        line  ln  = array.get(lnRedondos, k)
+        float lvl = f_nivelRedondo(k)
+        // El tope de cuatro líneas de §4 se aplica aquí igual que a los demás
+        // niveles: los redondos no tienen presupuesto propio.
+        if verRedOk and not na(lvl) and f_nivelVisible(lvl, P_OTRO)
             line.set_xy1(ln, bar_index - 60, lvl)
             line.set_xy2(ln, bar_index + 3,  lvl)
             line.set_color(ln, color.new(color.gray, 55))
@@ -2503,16 +2563,16 @@ if barstate.islast
         // del día natural de la vela que lo hizo: así se puede comprobar de un
         // vistazo que el lunes muestra el viernes.
         string fPrev = f_fechaClave(prevKey)
-        f_moverEtiq(lbPdh,  verPdh ? pdh : na, f_corto("PDH " +
+        f_moverEtiq(lbPdh,  verPdh and f_nivelVisible(pdh, P_PD) ? pdh : na, f_corto("PDH " +
              str.tostring(pdh, format.mintick) +
              (fPrev == "" ? "" : " · " + fPrev)), color.new(color.blue, 0))
-        f_moverEtiq(lbPdl,  verPdl ? pdl : na, f_corto("PDL " +
+        f_moverEtiq(lbPdl,  verPdl and f_nivelVisible(pdl, P_PD) ? pdl : na, f_corto("PDL " +
              str.tostring(pdl, format.mintick) +
              (fPrev == "" ? "" : " · " + fPrev)), color.new(color.blue, 0))
-        f_moverEtiq(lbHod,  verHod     ? hod      : na, "HOD "  + str.tostring(hod,      format.mintick), color.new(color.purple, 0))
-        f_moverEtiq(lbLod,  verLod     ? lod      : na, "LOD "  + str.tostring(lod,      format.mintick), color.new(color.purple, 0))
-        f_moverEtiq(lbSsO,  verOpen    ? sessOpen : na, "Open " + str.tostring(sessOpen, format.mintick), color.new(color.gray,  20))
-        f_moverEtiq(lbVwap, verVwapLvl ? vwap     : na, "VWAP " + str.tostring(vwap,     format.mintick), color.new(color.orange, 0))
+        f_moverEtiq(lbHod,  verHod     and f_nivelVisible(hod,      P_HL)   ? hod      : na, "HOD "  + str.tostring(hod,      format.mintick), color.new(color.purple, 0))
+        f_moverEtiq(lbLod,  verLod     and f_nivelVisible(lod,      P_HL)   ? lod      : na, "LOD "  + str.tostring(lod,      format.mintick), color.new(color.purple, 0))
+        f_moverEtiq(lbSsO,  verOpen    and f_nivelVisible(sessOpen, P_OTRO) ? sessOpen : na, "Open " + str.tostring(sessOpen, format.mintick), color.new(color.gray,  20))
+        f_moverEtiq(lbVwap, verVwapLvl and f_nivelVisible(vwap,     P_VWAP) ? vwap     : na, "VWAP " + str.tostring(vwap,     format.mintick), color.new(color.orange, 0))
     else
         f_moverEtiq(lbPdh,  na, "", chart.fg_color)
         f_moverEtiq(lbPdl,  na, "", chart.fg_color)
