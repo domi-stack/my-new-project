@@ -393,6 +393,45 @@ i_s1R       = input.float(1.8, "R fijo del objetivo", minval = 0.5, maxval = 5.0
      tooltip = "1,8 está dentro del 1,5 a 2R de la especificación.")
 i_s1PorLado = input.bool(true, "Máximo una operación por lado y día", group = G_S1)
 
+// --- S2 · pullback a VWAP en día tendencial ---------------------------------
+const string G_S2 = "S2 · Pullback a VWAP"
+i_s2On      = input.bool(false, "Activar S2 · pullback a VWAP", group = G_S2,
+     tooltip = "APAGADA. Solo puede operar con el día clasificado como TENDENCIA, así que depende del clasificador de régimen.\n\n" +
+               "AVISO SOBRE LOS DATOS: en MGC el volumen es real y su VWAP es fiable. En XAUUSD spot de Dukascopy el volumen es cuenta " +
+               "de ticks, así que el VWAP es una APROXIMACIÓN y un backtest de S2 sobre esos datos mide una serie que no es la que " +
+               "operarías. Vale para descartar, no para confirmar.")
+i_s2Desde   = input.int(30, "Entradas desde (minutos tras la apertura de NY)", minval = 0, maxval = 390, group = G_S2)
+i_s2Hasta   = input.int(60, "Entradas hasta (minutos tras la apertura de NY)", minval = 5, maxval = 390, group = G_S2,
+     tooltip = "La especificación dice 'pasados 30 a 60 minutos', y así está puesto. Es una ventana ESTRECHA: el retroceso tiene que " +
+               "ocurrir justo ahí, y la mayoría de días no ocurrirá. Si lo que querías era 'no antes de 30 minutos', sube este valor.")
+i_s2PendN   = input.int(12, "Velas para medir la pendiente del VWAP", minval = 3, maxval = 60, group = G_S2)
+i_s2PendMin = input.float(0.25, "Pendiente mínima · (VWAP − VWAP[N]) / ATR", minval = 0.0, step = 0.05, group = G_S2,
+     tooltip = "Criterio de pendiente ADIMENSIONAL: la variación del VWAP en N velas dividida por el ATR. Al ser un cociente, el mismo " +
+               "umbral vale en MGC y en XAUUSD y no depende del zoom ni de la escala del gráfico, que es lo que hace inservible medir " +
+               "un ángulo en grados.")
+i_s2Donde   = input.string("VWAP", "Dónde se entra",
+     options = ["VWAP", "Banda 1σ", "VWAP o banda 1σ"], group = G_S2)
+i_s2Sigma   = input.float(1.0, "Sigmas de la banda de S2", minval = 0.25, maxval = 3.0, step = 0.25, group = G_S2,
+     tooltip = "Banda propia de S2, independiente de la del veto de bandas: ese input pertenece a otro filtro y mezclarlos haría que " +
+               "ajustar uno moviera el otro.")
+i_s2Margen  = input.float(0.5, "Margen del stop por detrás del nivel (USD/oz)", minval = 0.0, step = 0.1, group = G_S2)
+i_s2R       = input.float(1.8, "R fijo del objetivo", minval = 0.5, maxval = 5.0, step = 0.1, group = G_S2)
+
+// --- S3 · fade de las bandas ±2σ en día de rango ----------------------------
+const string G_S3 = "S3 · Fade de bandas"
+i_s3On      = input.bool(false, "Activar S3 · fade de bandas", group = G_S3,
+     tooltip = "APAGADA. Solo puede operar con el día clasificado como RANGO, así que es mutuamente excluyente con S2 por " +
+               "construcción, no por un filtro añadido.\n\n" +
+               "Le aplica el MISMO aviso de datos que a S2: el VWAP de XAUUSD spot de Dukascopy es una aproximación, y aquí además la " +
+               "señal es la DESVIACIÓN TÍPICA de ese VWAP, que hereda el error amplificado.")
+i_s3Sigma   = input.float(2.0, "Sigmas de la banda que se opera", minval = 1.0, maxval = 4.0, step = 0.25, group = G_S3)
+i_s3Margen  = input.float(0.5, "Margen del stop más allá de la mecha (USD/oz)", minval = 0.0, step = 0.1, group = G_S3)
+i_s3Obj     = input.string("VWAP del día", "Objetivo de S3",
+     options = ["VWAP del día", "R fijo"], group = G_S3,
+     tooltip = "En un fade el objetivo natural es la vuelta a la media, o sea el VWAP. El R fijo está para medir la misma entrada con " +
+               "un objetivo comparable al de las demás.")
+i_s3R       = input.float(1.5, "R fijo del objetivo", minval = 0.5, maxval = 5.0, step = 0.1, group = G_S3)
+
 const string G_REG = "Régimen de mercado"
 i_clasReg   = input.string("Rango del día / ATR", "Clasificador tendencia-rango",
      options = ["Rango del día / ATR", "ADX", "Persistencia respecto al VWAP"], group = G_REG,
@@ -2253,6 +2292,108 @@ if i_s1On and confBar and enVentS1 and not na(atr)
         if vale
             f_addCand("S1", -1, stp, tgt,
                  "S1 barrido de " + nomDn + " a " + str.tostring(lvlDn, format.mintick))
+
+// --- S2 y S3 · pullback a VWAP y fade de bandas -----------------------------
+//  LAS DOS SON MUTUAMENTE EXCLUYENTES POR CONSTRUCCIÓN: S2 exige regimen == 1
+//  y S3 exige regimen == -1, y `regimen` es un solo valor por vela. No hay un
+//  `and not` que alguien pueda quitar por descuido y dejarlas peleando.
+//
+//  POR QUÉ 5 MINUTOS Y NO 1 (conflicto 2 del encargo). La especificación de S2
+//  pedía señal en 1 minuto. No se hace, y no es por comodidad: pedir "1" con
+//  request.security desde un gráfico de 5m devuelve SOLO la última vela de 1m
+//  contenida en cada vela de 5m, no la secuencia de cinco. El toque al VWAP
+//  ocurre en cualquiera de las cinco, así que en cuatro de cada cinco casos
+//  sería invisible. La alternativa, lookahead_on sin desplazar, sí leería el
+//  futuro. Lo que se pierde al quedarse en 5m: el toque se detecta hasta cuatro
+//  minutos más tarde y el stop sale más ancho, porque se mide contra la mecha
+//  de una vela de 5m en vez de una de 1m. Es un coste real y medible, no cero.
+//
+//  Guarda de pendiente: si el VWAP se reinició hace menos de N velas, la
+//  pendiente compara dos sesiones distintas y no significa nada.
+int velasDesdeIni = nz(ta.barssince(windowStart), 999999)
+float s2Pend = na(vwap) or na(atr) or atr <= 0 or velasDesdeIni < i_s2PendN ? na :
+     (vwap - vwap[i_s2PendN]) / atr
+int minDesdeNY = nowMinNY - (9 * 60 + 30)
+
+float s2BandaUp = na(vwapSd) ? na : vwap + i_s2Sigma * vwapSd
+float s2BandaDn = na(vwapSd) ? na : vwap - i_s2Sigma * vwapSd
+float s3BandaUp = na(vwapSd) ? na : vwap + i_s3Sigma * vwapSd
+float s3BandaDn = na(vwapSd) ? na : vwap - i_s3Sigma * vwapSd
+
+//  La condición se hoistea a una variable en vez de envolver el `if` en dos
+//  líneas: una condición partida seguida de un cuerpo indentado es justo el
+//  sitio donde la regla de indentación de Pine se vuelve ambigua.
+bool s2Vent   = minDesdeNY >= i_s2Desde and minDesdeNY <= i_s2Hasta
+bool s2Activo = i_s2On and confBar and regimen == 1 and not na(atr) and
+     not na(s2Pend) and s2Vent
+
+if s2Activo
+    bool usaVwap  = i_s2Donde != "Banda 1σ"
+    bool usaBanda = i_s2Donde != "VWAP"
+
+    // --- Largo: VWAP subiendo y retroceso que lo toca y cierra por encima
+    if s2Pend >= i_s2PendMin and close > vwap
+        float niv = na
+        string nomN = ""
+        if usaVwap and low <= vwap
+            niv  := vwap
+            nomN := "VWAP"
+        else if usaBanda and not na(s2BandaDn) and low <= s2BandaDn
+            niv  := s2BandaDn
+            nomN := str.tostring(i_s2Sigma, "#.##") + "σ inferior"
+        if not na(niv)
+            float sr  = math.min(low, niv) - i_s2Margen
+            float stp = math.floor(sr / f_tickPoints) * f_tickPoints
+            float rsk = close - stp
+            if rsk > 0
+                f_addCand("S2", 1, stp, close + i_s2R * rsk,
+                     "S2 retroceso al " + nomN + " con VWAP al alza (" +
+                     str.tostring(s2Pend, "#.##") + " ATR/" + str.tostring(i_s2PendN) + "v)")
+
+    // --- Corto: VWAP bajando y retroceso que lo toca y cierra por debajo
+    if s2Pend <= -i_s2PendMin and close < vwap
+        float niv = na
+        string nomN = ""
+        if usaVwap and high >= vwap
+            niv  := vwap
+            nomN := "VWAP"
+        else if usaBanda and not na(s2BandaUp) and high >= s2BandaUp
+            niv  := s2BandaUp
+            nomN := str.tostring(i_s2Sigma, "#.##") + "σ superior"
+        if not na(niv)
+            float sr  = math.max(high, niv) + i_s2Margen
+            float stp = math.ceil(sr / f_tickPoints) * f_tickPoints
+            float rsk = stp - close
+            if rsk > 0
+                f_addCand("S2", -1, stp, close - i_s2R * rsk,
+                     "S2 retroceso al " + nomN + " con VWAP a la baja (" +
+                     str.tostring(s2Pend, "#.##") + " ATR/" + str.tostring(i_s2PendN) + "v)")
+
+//  S3 · fade: la vela perfora la banda y cierra de vuelta dentro. Es la misma
+//  forma que S1, con la banda haciendo de nivel en lugar de la liquidez.
+if i_s3On and confBar and regimen == -1 and not na(atr) and not na(vwapSd)
+    // Largo: perfora la banda inferior y cierra por encima
+    if not na(s3BandaDn) and low < s3BandaDn and close > s3BandaDn
+        float sr  = low - i_s3Margen
+        float stp = math.floor(sr / f_tickPoints) * f_tickPoints
+        float rsk = close - stp
+        float tgt = i_s3Obj == "R fijo" ? close + i_s3R * rsk : vwap
+        bool  ok  = rsk > 0 and not na(tgt) and tgt > close
+        if ok
+            f_addCand("S3", 1, stp, tgt,
+                 "S3 fade de la banda " + str.tostring(i_s3Sigma, "#.##") +
+                 "σ inferior en día de rango")
+    // Corto: perfora la banda superior y cierra por debajo
+    if not na(s3BandaUp) and high > s3BandaUp and close < s3BandaUp
+        float sr  = high + i_s3Margen
+        float stp = math.ceil(sr / f_tickPoints) * f_tickPoints
+        float rsk = stp - close
+        float tgt = i_s3Obj == "R fijo" ? close - i_s3R * rsk : vwap
+        bool  ok  = rsk > 0 and not na(tgt) and tgt < close
+        if ok
+            f_addCand("S3", -1, stp, tgt,
+                 "S3 fade de la banda " + str.tostring(i_s3Sigma, "#.##") +
+                 "σ superior en día de rango")
 
 // =============================================================================
 //  8 · CONSTRUCCIÓN Y EJECUCIÓN DE LA OPERACIÓN
