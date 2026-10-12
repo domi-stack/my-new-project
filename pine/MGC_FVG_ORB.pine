@@ -2338,9 +2338,6 @@ else
              " · SL " + str.tostring(pStop + i_baseFut, format.mintick) +
              " · TP " + str.tostring(pTgt + i_baseFut, format.mintick)
 
-// Aviso de precios spot: el ticker no es de futuros de oro.
-bool esSpot = not (str.startswith(syminfo.ticker, "MGC") or str.startswith(syminfo.ticker, "GC"))
-
 // Etiqueta de acción a la derecha del precio.
 var label lbAcc = na
 if barstate.islast
@@ -2657,12 +2654,12 @@ if i_soloAlta and barstate.islast
 
     rl := f_filaLimpia(rl, "Calibración", CAL_TXT, color.new(color.orange, 0))
 
-    // §3.4 · aviso de precios spot
-    table.cell(limpia, 0, 4, esSpot ? "AVISO" : "", text_size = size.small,
-         bgcolor = esSpot ? color.new(color.orange, 70) : color.new(color.gray, 100))
-    table.cell(limpia, 1, 4, esSpot ? "Precios SPOT: sumar base futuros−spot antes de ejecutar" : "",
-         text_size = size.small, text_color = color.new(color.orange, 0),
-         bgcolor = esSpot ? color.new(color.orange, 70) : color.new(color.gray, 100))
+    // El aviso de gráfico spot se ha eliminado (v2.7 §6): ni etiqueta ni fila.
+    // El input 'Base futuros − spot' sigue estando y sigue convirtiendo los
+    // precios en la etiqueta de acción, que es su trabajo; lo que desaparece es
+    // el cartel. Sin él, estas filas que esta pasada no haya usado se borran.
+    if rl <= N_LIMPIA - 1
+        table.clear(limpia, 0, rl, 1, N_LIMPIA - 1)
 
 
 // =============================================================================
