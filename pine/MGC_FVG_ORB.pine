@@ -890,6 +890,88 @@ var array<Operacion> ops = array.new<Operacion>()
 // deja el precio apretado contra el borde izquierdo.
 const int X_DER = 5
 
+// =============================================================================
+//  RÓTULOS · 40 caracteres y prioridad ante colisión (v2.7 §3)
+// =============================================================================
+//  Dos reglas:
+//   1. En el gráfico, texto corto. La explicación larga va al tooltip, que no
+//      ocupa píxeles hasta que se pide.
+//   2. Si dos rótulos quedan a menos de 0,5 ATR solo se muestra el de mayor
+//      prioridad: 4H > 1H > PDH/PDL > HOD/LOD > 5m > el resto.
+//
+//  El orden que pide la v2.7 incluye un 15m que este script no tiene: los
+//  marcos son el del gráfico, el intermedio (1H) y el mayor (4H). La escala se
+//  queda por tanto en cuatro peldaños de zona y 15m no aparece. HOD/LOD se
+//  colocan justo por debajo de PDH/PDL, que es donde encajan: son niveles de
+//  referencia, pero el día anterior ya está cerrado y el de hoy no.
+const int P_4H   = 5
+const int P_1H   = 4
+const int P_PD   = 3
+const int P_HL   = 2
+const int P_TF   = 1
+const int P_VWAP = 1
+const int P_OTRO = 0
+const int LARGO_MAX = 40
+
+f_prioZona(int prio) => prio == 3 ? P_4H : prio == 2 ? P_1H : P_TF
+
+// Recorta a 40 caracteres en vez de confiar en que el texto quepa: si alguien
+// alarga un rótulo, el tope lo corta en lugar de tapar el gráfico.
+f_corto(string s) =>
+    str.length(s) <= LARGO_MAX ? s : str.substring(s, 0, LARGO_MAX)
+
+// Texto de zona con el formato de §3: "4H FVG ▼ 4171–4191".
+f_zonaTxt(Zona z) =>
+    f_corto(z.tf + " FVG " + (z.dir == 1 ? "▲" : "▼") + " " +
+         str.tostring(z.bot, format.mintick) + "–" + str.tostring(z.top, format.mintick) +
+         (z.inverted ? " inv" : "") + (z.state >= 2 ? " ✕" : ""))
+
+// ¿Hay otro precio a menos de medio ATR?
+f_cercaNivel(float y, float a) =>
+    float tol = na(atr) ? 0.0 : 0.5 * atr
+    tol > 0 and not na(y) and not na(a) and math.abs(y - a) <= tol
+
+// ¿Tapa un nivel de mayor prioridad al rótulo que está en y?
+f_tapadoPorNivel(float y, int p) =>
+    bool t = false
+    if p < P_PD
+        if f_cercaNivel(y, pdh) or f_cercaNivel(y, pdl)
+            t := true
+    if p < P_HL
+        if f_cercaNivel(y, hod) or f_cercaNivel(y, lod)
+            t := true
+    t
+
+// ¿Tapa una zona visible de mayor prioridad al rótulo que está en y? Solo
+// cuentan las zonas vivas: una consumida ya no manda sobre nada.
+//  Esta versión lee z.visible y sirve para los rótulos de nivel, que se
+//  resuelven en barstate.islast, cuando visible ya es definitivo.
+f_tapadoPorZona(float y, int p) =>
+    bool t = false
+    if array.size(zones) > 0
+        for i = 0 to array.size(zones) - 1
+            Zona z = array.get(zones, i)
+            if z.visible and z.state <= 1 and f_prioZona(z.prio) > p
+                if f_cercaNivel(y, z.mid)
+                    t := true
+    t
+
+//  Esta otra lee el array de visibilidad que se acaba de calcular, no
+//  z.visible. Durante la pasada de aplicación z.visible está a medio
+//  actualizar, y leerlo ahí haría que el resultado dependiera del orden del
+//  recorrido, que es el mismo error que la regla del solape.
+f_tapadoPorZonaVis(float y, int p, int idx, array<bool> vis) =>
+    bool t = false
+    if array.size(zones) > 0 and array.size(vis) == array.size(zones)
+        for j = 0 to array.size(zones) - 1
+            if j != idx and array.get(vis, j)
+                Zona w = array.get(zones, j)
+                if w.state <= 1 and f_prioZona(w.prio) > p
+                    if f_cercaNivel(y, w.mid)
+                        t := true
+    t
+
+
 // --- Aspecto de las zonas ---------------------------------------------------
 //  Verde = zona de COMPRA (soporte), rojo = zona de VENTA (resistencia).
 //  Tres tonalidades dentro de cada color según el estado: virgen marcada,
@@ -910,12 +992,6 @@ f_zoneBorder(int dir, int state) =>
 
 f_zoneWidth(int prio) =>
     prio == 3 ? 3 : prio == 2 ? 2 : 1
-
-f_zoneLabel(int dir, string tfName, bool inv, int state) =>
-    string s = (dir == 1 ? "COMPRA" : "VENTA") + " · " + tfName
-    s += inv ? " (inv)" : ""
-    s += state >= 2 ? " ✕" : ""
-    s
 
 // Liquidez previa: ¿nació esta zona poco después de un barrido del lado
 // contrario? Una zona alcista vale más si antes se barrieron mínimos.
@@ -946,7 +1022,7 @@ f_addZone(float top, float bot, int dir, string tfName, int prio, float tfAtr) =
              border_color = f_zoneBorder(dir, 0),
              bgcolor      = f_zoneColor(dir, 0),
              border_width = f_zoneWidth(prio),
-             text         = i_zoneText ? f_zoneLabel(dir, tfName, false, 0) : "",
+             text         = i_zoneText ? f_zonaTxt(z) : "",
              text_color   = color.new(dir == 1 ? color.green : color.red, 0),
              text_size    = size.small,
              text_halign  = text.align_right,
@@ -1134,7 +1210,7 @@ if barstate.isconfirmed and array.size(zones) > 0
             box.set_bgcolor(z.bx, f_zoneColor(z.dir, z.state))
             box.set_border_color(z.bx, f_zoneBorder(z.dir, z.state))
             if i_zoneText
-                box.set_text(z.bx, f_zoneLabel(z.dir, z.tf, z.inverted, z.state))
+                box.set_text(z.bx, f_zonaTxt(z))
                 box.set_text_color(z.bx, color.new(z.dir == 1 ? color.green : color.red, z.state >= 2 ? 55 : 0))
         array.set(zones, i, z)
 
@@ -1289,20 +1365,15 @@ f_bordeScore(Zona z) =>
 f_anchoScore(Zona z) => f_zoneWidth(z.prio) + (z.tier == 2 ? 1 : 0)
 f_estiloScore(Zona z) => z.tier == 0 ? line.style_dashed : line.style_solid
 
-// Texto de zona con el formato de §1.4, ahora que el score existe.
-f_zoneLabelScore(Zona z) =>
-    z.tf + " " + (z.dir == 1 ? "▲" : "▼") + " " + str.tostring(z.score) + " " + f_tierTxt(z.tier) +
-         (z.inverted ? " inv" : "")
-
 // Devuelve una zona a su aspecto normal, con la tonalidad del score.
-f_restaurarZona(Zona z) =>
+f_restaurarZona(Zona z, bool conTexto) =>
     if not na(z.bx)
         box.set_bgcolor(z.bx, f_colorScore(z))
         box.set_border_color(z.bx, f_bordeScore(z))
         box.set_border_width(z.bx, f_anchoScore(z))
         box.set_border_style(z.bx, f_estiloScore(z))
         if i_zoneText
-            box.set_text(z.bx, z.state >= 2 ? "" : f_zoneLabelScore(z))
+            box.set_text(z.bx, z.state >= 2 or not conTexto ? "" : f_zonaTxt(z))
             box.set_text_color(z.bx, chart.fg_color)
             box.set_text_size(z.bx, size.small)
 
@@ -1322,14 +1393,16 @@ f_atenuarZona(Zona z) =>
 // zonas a la vista, y es también lo que hace que todas parezcan igual de
 // importantes. Sin relleno la zona sigue ahí y sigue leyéndose, pero no compite
 // con la que de verdad está en juego. El desglose sigue en el tooltip.
-f_contornoZona(Zona z) =>
+f_contornoZona(Zona z, bool conTexto) =>
     if not na(z.bx)
         color col = z.state >= 2 ? color.gray : (z.dir == 1 ? color.green : color.red)
         box.set_bgcolor(z.bx, color.new(col, 100))
         box.set_border_color(z.bx, color.new(col, z.state >= 2 ? 70 : 35))
         box.set_border_width(z.bx, 1)
         box.set_border_style(z.bx, z.state >= 2 ? line.style_dashed : line.style_solid)
-        box.set_text(z.bx, "")
+        box.set_text(z.bx, i_zoneText and conTexto and z.state <= 1 ? f_zonaTxt(z) : "")
+        box.set_text_color(z.bx, color.new(col, 25))
+        box.set_text_size(z.bx, size.small)
 
 f_destacarZona(Zona z) =>
     if not na(z.bx)
@@ -1341,9 +1414,11 @@ f_destacarZona(Zona z) =>
         // §3.1.2 pide aquí la P y la E[R] de validación. No existen: en su
         // lugar van el score y el tier, que sí existen, y la marca de que esto
         // no está calibrado. No se muestra ningún porcentaje.
-        box.set_text(z.bx, (z.dir == 1 ? "COMPRA" : "VENTA") + " · " + z.tf +
-             (z.inverted ? " · inv" : "") + " · " + str.tostring(z.score) + " " +
-             f_tierTxt(z.tier) + " · " + CAL_TXT)
+        // §3 · en el gráfico solo lo imprescindible. La marca de SIN CALIBRAR
+        // y el desglose del score viajan en el tooltip de la label invisible.
+        box.set_text(z.bx, f_corto((z.dir == 1 ? "COMPRA " : "VENTA ") + z.tf +
+             (z.inverted ? " inv" : "") + " " + str.tostring(z.score) + " " +
+             f_tierTxt(z.tier)))
         box.set_text_color(z.bx, color.new(col, 0))
         box.set_text_size(z.bx, size.normal)
 
@@ -1436,7 +1511,8 @@ if i_soloAlta and barstate.isconfirmed and array.size(zones) > 0
                 if slot - 1 < array.size(tipScore) and slot >= 1
                     label lt = array.get(tipScore, slot - 1)
                     label.set_xy(lt, bar_index + 1, zb.mid)
-                    label.set_tooltip(lt, zb.scoreTxt)
+                    label.set_tooltip(lt, f_zonaTxt(zb) + "\n" + CAL_TXT +
+                         "\n" + zb.scoreTxt)
 
 else if barstate.isconfirmed and array.size(zones) > 0
     int tipSlot = 0
@@ -1517,19 +1593,28 @@ else if barstate.isconfirmed and array.size(zones) > 0
                     dDn    := d
 
     // --- Aplicación
-    //  Restilar solo si cambió el tier, el estado o el modo de relleno (§2.2);
+    //  Restilar solo si cambió el tier, el estado o el modo de dibujo (§2.2);
     //  mostrar u ocultar se aplica siempre, porque depende de la distancia y
     //  cambia en cada vela.
+    //  rendFill codifica las dos decisiones de dibujo en un número, para que la
+    //  caché no se quede corta: bit del relleno (2) más bit del texto (1).
     for i = 0 to nZon - 1
         Zona z = array.get(zones, i)
         if array.get(ver, i)
-            int quiero = (i == fillUp or i == fillDn) ? 1 : 0
+            bool relleno = i == fillUp or i == fillDn
+            // §3 · el rótulo se calla si otro de mayor prioridad está a menos
+            // de medio ATR. Una zona de 4H o 1H nunca se calla por un nivel,
+            // porque van por encima de PDH/PDL y de HOD/LOD en el orden.
+            int  pz     = f_prioZona(z.prio)
+            bool tapado = f_tapadoPorNivel(z.mid, pz) or
+                 f_tapadoPorZonaVis(z.mid, pz, i, ver)
+            int  quiero = (relleno ? 2 : 0) + (tapado ? 0 : 1)
             if z.rendTier != z.tier or z.rendEst != z.state or
                  z.rendFill != quiero or not z.visible
-                if quiero == 1
-                    f_restaurarZona(z)
+                if relleno
+                    f_restaurarZona(z, not tapado)
                 else
-                    f_contornoZona(z)
+                    f_contornoZona(z, not tapado)
                 z.rendTier := z.tier
                 z.rendEst  := z.state
                 z.rendFill := quiero
@@ -2263,7 +2348,11 @@ if barstate.islast
         lbAcc := label.new(bar_index + 3, close, "", style = label.style_label_left,
              textcolor = color.white, size = size.normal)
     label.set_xy(lbAcc, bar_index + 3, close)
-    label.set_text(lbAcc, accTxt + (accSub == "" ? "" : "\n" + accSub))
+    // §3 · en el gráfico solo el titular, acotado a 40 caracteres. El detalle
+    // (precios, riesgo, aviso de ATM, conversión a MGC) va al tooltip: ahí no
+    // ocupa píxeles hasta que se pide, y era el rótulo más largo del gráfico.
+    label.set_text(lbAcc, f_corto(accTxt))
+    label.set_tooltip(lbAcc, accTxt + (accSub == "" ? "" : "\n" + accSub))
     label.set_color(lbAcc, accCol)
 
 // =============================================================================
@@ -2273,7 +2362,45 @@ if barstate.islast
 //  destacadas. Nada de esto se deja de calcular: solo se deja de dibujar.
 bool verExtras = not i_soloAlta
 
-plot(verExtras and i_showVwap and inSession ? vwap   : na, "VWAP sesión", color = color.new(color.orange, 0), linewidth = 2)
+// =============================================================================
+//  9a · QUÉ NIVELES SE DIBUJAN (v2.7 §3)
+// =============================================================================
+//  Un nivel se calla si otro de mayor prioridad está a menos de 0,5 ATR. El
+//  orden es 4H > 1H > PDH/PDL > HOD/LOD > VWAP > apertura, y las zonas entran
+//  en la comparación: una zona de 4H tapa a un PDH que le caiga encima, porque
+//  va por delante en el orden.
+//  A igualdad de prioridad (PDH contra PDL, HOD contra LOD) se queda el más
+//  cercano al precio, que es el que está en juego. Puede pasar en un día
+//  estrecho, donde el rango entero cabe en medio ATR.
+//  Se resuelve aquí, en ámbito global, y no dentro del bloque de etiquetas,
+//  para que la línea y su rótulo no puedan contradecirse.
+bool verPdh = not na(pdh) and not f_tapadoPorZona(pdh, P_PD)
+bool verPdl = not na(pdl) and not f_tapadoPorZona(pdl, P_PD)
+if verPdh and verPdl and f_cercaNivel(pdh, pdl)
+    if math.abs(pdh - close) <= math.abs(pdl - close)
+        verPdl := false
+    else
+        verPdh := false
+
+bool verHod = not na(hod) and not f_tapadoPorZona(hod, P_HL) and
+     not (verPdh and f_cercaNivel(hod, pdh)) and not (verPdl and f_cercaNivel(hod, pdl))
+bool verLod = not na(lod) and not f_tapadoPorZona(lod, P_HL) and
+     not (verPdh and f_cercaNivel(lod, pdh)) and not (verPdl and f_cercaNivel(lod, pdl))
+if verHod and verLod and f_cercaNivel(hod, lod)
+    if math.abs(hod - close) <= math.abs(lod - close)
+        verLod := false
+    else
+        verHod := false
+
+bool verVwapLvl = not na(vwap) and not f_tapadoPorZona(vwap, P_VWAP) and
+     not (verPdh and f_cercaNivel(vwap, pdh)) and not (verPdl and f_cercaNivel(vwap, pdl)) and
+     not (verHod and f_cercaNivel(vwap, hod)) and not (verLod and f_cercaNivel(vwap, lod))
+bool verOpen = not na(sessOpen) and not f_tapadoPorZona(sessOpen, P_OTRO) and
+     not (verPdh and f_cercaNivel(sessOpen, pdh)) and not (verPdl and f_cercaNivel(sessOpen, pdl)) and
+     not (verHod and f_cercaNivel(sessOpen, hod)) and not (verLod and f_cercaNivel(sessOpen, lod)) and
+     not (verVwapLvl and f_cercaNivel(sessOpen, vwap))
+
+plot(verExtras and i_showVwap and inSession and verVwapLvl ? vwap : na, "VWAP sesión", color = color.new(color.orange, 0), linewidth = 2)
 plot(verExtras and i_showVwap and inSession ? vwapUp : na, "VWAP +σ",     color = color.new(color.orange, 60))
 plot(verExtras and i_showVwap and inSession ? vwapDn : na, "VWAP -σ",     color = color.new(color.orange, 60))
 
@@ -2282,17 +2409,17 @@ plot(verExtras and i_showVwap and inSession ? vwapDn : na, "VWAP -σ",     color
 //  §1.5 pide PDH/PDL a 2 px y los de sesión punteados: `plot` no tiene estilo
 //  punteado, así que los de sesión quedan en stepline de 1 px, que es lo más
 //  tenue disponible sin pasarlos a objetos `line`.
-plot(i_showLvls ? pdh : na, "Máx. día anterior",
+plot(i_showLvls and verPdh ? pdh : na, "Máx. día anterior",
      color = i_soloAlta ? color.new(color.gray, 45) : color.new(color.blue, 30),
      style = plot.style_linebr, linewidth = i_soloAlta ? 1 : 2)
-plot(i_showLvls ? pdl : na, "Mín. día anterior",
+plot(i_showLvls and verPdl ? pdl : na, "Mín. día anterior",
      color = i_soloAlta ? color.new(color.gray, 45) : color.new(color.blue, 30),
      style = plot.style_linebr, linewidth = i_soloAlta ? 1 : 2)
 // HOD y LOD, no los extremos de la ventana: ver §1a. No se condicionan a
 // inSession porque el día de trading no se interrumpe cuando la ventana cierra.
-plot(verExtras and i_showLvls ? hod : na, "HOD", color = color.new(color.purple, 40), style = plot.style_stepline)
-plot(verExtras and i_showLvls ? lod : na, "LOD", color = color.new(color.purple, 40), style = plot.style_stepline)
-plot(verExtras and i_showLvls and inSession ? sessOpen : na, "Apertura sesión", color = color.new(color.gray,   40), style = plot.style_stepline)
+plot(verExtras and i_showLvls and verHod ? hod : na, "HOD", color = color.new(color.purple, 40), style = plot.style_stepline)
+plot(verExtras and i_showLvls and verLod ? lod : na, "LOD", color = color.new(color.purple, 40), style = plot.style_stepline)
+plot(verExtras and i_showLvls and inSession and verOpen ? sessOpen : na, "Apertura sesión", color = color.new(color.gray,   40), style = plot.style_stepline)
 
 bgcolor(verExtras and inSession ? color.new(color.blue, 94) : na, title = "Ventana de operativa")
 
@@ -2376,14 +2503,16 @@ if barstate.islast
         // del día natural de la vela que lo hizo: así se puede comprobar de un
         // vistazo que el lunes muestra el viernes.
         string fPrev = f_fechaClave(prevKey)
-        f_moverEtiq(lbPdh,  pdh, "PDH " + str.tostring(pdh, format.mintick) +
-             (fPrev == "" ? "" : " · " + fPrev), color.new(color.blue, 0))
-        f_moverEtiq(lbPdl,  pdl, "PDL " + str.tostring(pdl, format.mintick) +
-             (fPrev == "" ? "" : " · " + fPrev), color.new(color.blue, 0))
-        f_moverEtiq(lbHod,  hod,      "HOD "  + str.tostring(hod,      format.mintick), color.new(color.purple, 0))
-        f_moverEtiq(lbLod,  lod,      "LOD "  + str.tostring(lod,      format.mintick), color.new(color.purple, 0))
-        f_moverEtiq(lbSsO,  sessOpen, "Open " + str.tostring(sessOpen, format.mintick), color.new(color.gray,  20))
-        f_moverEtiq(lbVwap, vwap,     "VWAP " + str.tostring(vwap,     format.mintick), color.new(color.orange, 0))
+        f_moverEtiq(lbPdh,  verPdh ? pdh : na, f_corto("PDH " +
+             str.tostring(pdh, format.mintick) +
+             (fPrev == "" ? "" : " · " + fPrev)), color.new(color.blue, 0))
+        f_moverEtiq(lbPdl,  verPdl ? pdl : na, f_corto("PDL " +
+             str.tostring(pdl, format.mintick) +
+             (fPrev == "" ? "" : " · " + fPrev)), color.new(color.blue, 0))
+        f_moverEtiq(lbHod,  verHod     ? hod      : na, "HOD "  + str.tostring(hod,      format.mintick), color.new(color.purple, 0))
+        f_moverEtiq(lbLod,  verLod     ? lod      : na, "LOD "  + str.tostring(lod,      format.mintick), color.new(color.purple, 0))
+        f_moverEtiq(lbSsO,  verOpen    ? sessOpen : na, "Open " + str.tostring(sessOpen, format.mintick), color.new(color.gray,  20))
+        f_moverEtiq(lbVwap, verVwapLvl ? vwap     : na, "VWAP " + str.tostring(vwap,     format.mintick), color.new(color.orange, 0))
     else
         f_moverEtiq(lbPdh,  na, "", chart.fg_color)
         f_moverEtiq(lbPdl,  na, "", chart.fg_color)
