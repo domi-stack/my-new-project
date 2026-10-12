@@ -432,6 +432,28 @@ i_s3Obj     = input.string("VWAP del día", "Objetivo de S3",
                "un objetivo comparable al de las demás.")
 i_s3R       = input.float(1.5, "R fijo del objetivo", minval = 0.5, maxval = 5.0, step = 0.1, group = G_S3)
 
+// --- S4 · segundo movimiento tras noticias ----------------------------------
+const string G_S4 = "S4 · Segundo movimiento tras noticias"
+i_s4On      = input.bool(false, "Activar S4 · segundo movimiento tras noticias", group = G_S4,
+     tooltip = "APAGADA, y con un motivo añadido al de las demás: COMPRUEBA ANTES SI TU PROP FIRM RESTRINGE OPERAR NOTICIAS. Muchas " +
+               "evaluaciones prohíben tener posición abierta en una ventana alrededor de las publicaciones y anulan la cuenta o la " +
+               "operación si se incumple, con independencia del resultado. Que el código pueda no significa que el contrato permita.\n\n" +
+               "Ojo además con el bloqueo por noticias de la Ventana de operativa: si usas ese input a la vez, su veto se aplica " +
+               "también a S4 y la dejará sin operar. Son dos listas independientes a propósito, una para bloquear y otra para operar.")
+i_s4Horas   = input.string("0830,1000,1400", "Horas de publicación (HHMM ET, separadas por comas)", group = G_S4,
+     tooltip = "IPC y NFP a las 08:30 ET, datos de la mañana a las 10:00, FOMC a las 14:00. Ajústalo al calendario real: estas son las " +
+               "habituales, no una lista verificada.")
+i_s4Desde   = input.int(5,  "Esperar al menos (minutos tras la publicación)", minval = 1, maxval = 60, group = G_S4,
+     tooltip = "No se entra en el primer minuto. El rango inicial es la vela que CONTIENE la publicación.")
+i_s4Hasta   = input.int(15, "Y como mucho (minutos tras la publicación)", minval = 2, maxval = 120, group = G_S4)
+i_s4Modo    = input.string("Las dos", "Qué se opera",
+     options = ["Ruptura", "Fallo", "Las dos"], group = G_S4,
+     tooltip = "RUPTURA: cierre fuera del rango inicial, en esa dirección. FALLO: mecha fuera y cierre de vuelta dentro, en la " +
+               "dirección contraria. 'Las dos' puede generar las dos señales en la misma ventana, en velas distintas.")
+i_s4Margen  = input.float(0.5, "Margen del stop (USD/oz)", minval = 0.0, step = 0.1, group = G_S4)
+i_s4R       = input.float(1.8, "R fijo del objetivo", minval = 0.5, maxval = 5.0, step = 0.1, group = G_S4)
+i_s4UnaPorN = input.bool(true, "Máximo una operación por publicación", group = G_S4)
+
 const string G_REG = "Régimen de mercado"
 i_clasReg   = input.string("Rango del día / ATR", "Clasificador tendencia-rango",
      options = ["Rango del día / ATR", "ADX", "Persistencia respecto al VWAP"], group = G_REG,
@@ -2395,6 +2417,93 @@ if i_s3On and confBar and regimen == -1 and not na(atr) and not na(vwapSd)
                  "S3 fade de la banda " + str.tostring(i_s3Sigma, "#.##") +
                  "σ superior en día de rango")
 
+// --- S4 · segundo movimiento tras noticias ----------------------------------
+//  El rango inicial es la vela que CONTIENE la publicación. En un gráfico de
+//  5 minutos eso es literalmente "el rango inicial de 5 minutos" de la
+//  especificación, sin pedir nada a otro marco.
+//
+//  Después se espera entre i_s4Desde e i_s4Hasta minutos y se opera la ruptura
+//  de ese rango, o su fallo. No se entra en el primer minuto por construcción:
+//  la primera vela después de la publicación ya está a 5 minutos.
+int tfMin = math.max(1, int(timeframe.in_seconds(timeframe.period) / 60))
+
+//  ¿La publicación cae DENTRO de esta vela? Se compara contra la apertura de la
+//  vela y su duración, así que vale en cualquier temporalidad intradía y no
+//  supone que la hora sea múltiplo de la vela.
+f_s4EsVelaNoticia() =>
+    bool hit = false
+    if str.length(i_s4Horas) > 0
+        array<string> partes = str.split(i_s4Horas, ",")
+        for i = 0 to array.size(partes) - 1
+            string pz = str.replace_all(array.get(partes, i), " ", "")
+            if str.length(pz) == 4
+                float hh = str.tonumber(str.substring(pz, 0, 2))
+                float mm = str.tonumber(str.substring(pz, 2, 4))
+                if not na(hh) and not na(mm)
+                    int mNot = int(hh) * 60 + int(mm)
+                    if mNot >= nowMinNY and mNot < nowMinNY + tfMin
+                        hit := true
+    hit
+
+var float s4Hi   = na
+var float s4Lo   = na
+var int   s4Bar  = na
+var bool  s4Hecho = false
+
+if i_s4On and confBar
+    if f_s4EsVelaNoticia()
+        s4Hi    := high
+        s4Lo    := low
+        s4Bar   := bar_index
+        s4Hecho := false
+
+bool s4EnVentana = i_s4On and confBar and not na(s4Bar) and not na(s4Hi) and
+     (bar_index - s4Bar) * tfMin >= i_s4Desde and
+     (bar_index - s4Bar) * tfMin <= i_s4Hasta and
+     ((not i_s4UnaPorN) or not s4Hecho)
+
+if s4EnVentana
+    bool usaRup = i_s4Modo != "Fallo"
+    bool usaFal = i_s4Modo != "Ruptura"
+
+    // --- Ruptura al alza: el stop va al otro lado del rango inicial, que es lo
+    //     que invalida la lectura. Si el rango es enorme el stop se pasa del
+    //     techo de puntos y la máscara lo veta, que es el comportamiento
+    //     correcto en una vela de noticia desbocada.
+    if usaRup and close > s4Hi
+        float sr  = s4Lo - i_s4Margen
+        float stp = math.floor(sr / f_tickPoints) * f_tickPoints
+        float rsk = close - stp
+        if rsk > 0
+            f_addCand("S4", 1, stp, close + i_s4R * rsk,
+                 "S4 ruptura del rango de la noticia (" +
+                 str.tostring(s4Lo, format.mintick) + "-" + str.tostring(s4Hi, format.mintick) + ")")
+    if usaRup and close < s4Lo
+        float sr  = s4Hi + i_s4Margen
+        float stp = math.ceil(sr / f_tickPoints) * f_tickPoints
+        float rsk = stp - close
+        if rsk > 0
+            f_addCand("S4", -1, stp, close - i_s4R * rsk,
+                 "S4 ruptura del rango de la noticia (" +
+                 str.tostring(s4Lo, format.mintick) + "-" + str.tostring(s4Hi, format.mintick) + ")")
+
+    // --- Fallo: mecha fuera y cierre de vuelta dentro. Se opera al contrario,
+    //     y el stop va más allá de la mecha, no al otro lado del rango.
+    if usaFal and high > s4Hi and close < s4Hi and close > s4Lo
+        float sr  = high + i_s4Margen
+        float stp = math.ceil(sr / f_tickPoints) * f_tickPoints
+        float rsk = stp - close
+        if rsk > 0
+            f_addCand("S4", -1, stp, close - i_s4R * rsk,
+                 "S4 fallo de la ruptura al alza del rango de la noticia")
+    if usaFal and low < s4Lo and close > s4Lo and close < s4Hi
+        float sr  = low - i_s4Margen
+        float stp = math.floor(sr / f_tickPoints) * f_tickPoints
+        float rsk = close - stp
+        if rsk > 0
+            f_addCand("S4", 1, stp, close + i_s4R * rsk,
+                 "S4 fallo de la ruptura a la baja del rango de la noticia")
+
 // =============================================================================
 //  8 · CONSTRUCCIÓN Y EJECUCIÓN DE LA OPERACIÓN
 // =============================================================================
@@ -2733,6 +2842,9 @@ if setDir != 0 and confBar and not na(atr)
                     s1DiaUp := dayKey
                 else
                     s1DiaDn := dayKey
+            // S4 · una por publicación, por el mismo motivo.
+            if setEstr == "S4"
+                s4Hecho := true
             tradesToday += 1
             // Contador por fuente: lo leen el cupo propio y el reparto
             // rotatorio. Se incrementa AQUÍ, cuando la orden ya está puesta,
