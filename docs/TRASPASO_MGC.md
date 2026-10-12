@@ -5,7 +5,7 @@ Documento de contexto para continuar el trabajo en otra conversación. Fecha: 12
 **Fichero**: `pine/MGC_FVG_ORB.pine` · Pine Script v6 · `strategy()` · MGC 5 minutos
 **Tamaño**: 2895 líneas, 85 inputs
 **Versión**: v2.7 (limpieza visual, y dos bugs de niveles corregidos)
-**Segundo fichero**: `pine/MGC_v5_indicador.pine` · v5.1 · 1.033 líneas, 30 inputs · `indicator()` · 24 h, puerta de calidad única. **Falta su versión `strategy()`**, que estaba pedida en el mismo encargo.
+**Segundo fichero**: `pine/MGC_v5_indicador.pine` · v5.2 · 1.295 líneas, 31 inputs · `indicator()` · 24 h, puerta de calidad única. **Falta su versión `strategy()`**, que estaba pedida en el mismo encargo.
 **Repos**: `domi-stack/crisol` (main) y `domi-stack/my-new-project` (rama `claude/orb-day-trading-bot-es-3bo9db`, PR #1 abierto)
 
 Documentos de especificación que se han seguido, en orden de precedencia creciente:
@@ -174,6 +174,24 @@ Siete commits (`810cb16` a `c7cb868`) sobre `pine/MGC_v5_indicador.pine`. Ningú
 6. **El panel oculta Score, E/SL/TP1, R:R, Contratos y Antigüedad cuando no hay setup vivo**, con el mismo contador de filas que la v2.7 §5.
 
 **Checklist, prueba 9 nueva:** comparar un día completo en Bar Replay y exigir que rombos y flechas caigan en la misma vela que en el histórico. Es la prueba del punto 2, y es más estrecha que la prueba 1: esa mira si algo repinta, esta mira si histórico y vivo son la misma serie.
+
+---
+
+### v5.2 · Contexto multimarco y disparos con resultado
+
+Dos commits (`6408ccd`, `7e750c9`), uno por bloque. **El bloque A del encargo ya estaba aplicado en la v5.1**, así que no generó commit; verificado punto por punto.
+
+**Bloque B · contexto multimarco.** Zonas de 4H (`f_fvgHtf` en `"240"`, peso 9, entre el 1H y el diario). `f_estructura` también en 60 y 240, de modo que el sesgo pasa de uno a **cinco votos** (VWAP, apertura, 15m, 1H, 4H) con umbral 3. El componente de alineación del score reparte el **mismo** `w_sesgo` entre los tres marcos (4H 40 %, 1H 32 %, 15m 28 %; a favor entero, rango la mitad, en contra cero): el peso total no cambia, lo que cambia es que un setup con el 4H a favor y el 15m en contra deja de puntuar igual que al revés. Rangos de Asia y Londres acumulados solo en velas confirmadas y **fijados al cerrar la sesión** —acumulador y valor fijado son dos variables distintas, porque un nivel que se mueve no es un nivel— y metidos en los barridos, el inventario de niveles y las confluencias. `barrUpNom`/`barrDnNom` dicen qué nivel se barrió, con el encadenado en orden de importancia del nivel. `ctxTxt` en una fila nueva del panel.
+
+**Bloque C · los disparos se quedan con su resultado.** El fallo de fondo: el seguimiento del resultado vivía dentro del bucle por dirección, así que solo podía medir el setup al que `sL`/`sS` apuntaba en ese momento, y un ARMADO nuevo en la misma dirección **dejaba al anterior sin medir y sin archivar**. Ahora cada disparo vive en `abiertos` con su `uid` hasta que cierra, y puede haber varios a la vez en el mismo sentido.
+
+Tres decisiones que conviene no revertir por descuido:
+
+1. **La entrada real es el cierre de la vela del DISPARO**, no el del ARMADO, y el R:R se recalcula con ella. El del armado casi siempre es mejor que el real porque el precio ya ha avanzado hacia el objetivo, así que filtrar con él era filtrar con una cifra optimista.
+2. **El resultado solo se mide con `bar_index > barDisparo`.** Medir las mechas de la vela del disparo cuenta movimiento anterior a la entrada, y en una vela de desplazamiento eso regala un TP1 o inventa un SL que nadie tocó estando dentro.
+3. **TP1 y SL en la misma vela cuentan como SL.** No se sabe cuál llegó antes, y quedarse con el bueno es mentirse en la propia calibración.
+
+`f_archivar` corta cajas y líneas en la vela del cierre y las guarda en colas de 120 etiquetas, 240 cajas y 330 líneas (120 disparos completos, con margen bajo los 500 de la declaración para zonas, niveles y el setup vivo). Input nuevo `i_verHist`, encendido.
 
 ---
 
