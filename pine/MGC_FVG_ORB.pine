@@ -359,6 +359,40 @@ i_showSig   = input.bool(true, "Etiquetas COMPRA / VENTA",      group = G_VIS,
 //  rango) se anulan entre sí sin él: en el mismo día, una compra el retroceso y
 //  la otra vende el extremo. Con el clasificador son MUTUAMENTE EXCLUYENTES por
 //  construcción, no por un `and not` pegado después.
+// --- S1 · barrido de liquidez (falsa ruptura) -------------------------------
+//  ESTO NO ESTÁ VALIDADO. La idea viene de una inferencia: si la ruptura del
+//  ORB tiene esperanza negativa, su fallo podría ser donde está la ventaja. Es
+//  una inferencia SIN COMPROBAR, no un hecho, y el espejo de una estrategia
+//  perdedora no es automáticamente ganadora: entre las dos se queda la
+//  comisión, el slippage y todas las veces que la ruptura no falla.
+const string G_S1 = "S1 · Barrido de liquidez"
+i_s1On      = input.bool(false, "Activar S1 · barrido de liquidez", group = G_S1,
+     tooltip = "APAGADO. Hipótesis sin validar: el espejo del ORB que ya mediste. Enciéndelo para medirlo, no porque esté comprobado.")
+i_s1Refs    = input.string("Día anterior + Asia + Londres", "Niveles que cuentan como liquidez",
+     options = ["Solo día anterior", "Día anterior + Asia", "Día anterior + Asia + Londres"], group = G_S1)
+i_s1Vent    = input.session("0800-1130", "Ventana de S1 (hora de Nueva York)", group = G_S1,
+     tooltip = "La de la especificación: 08:00 a 11:30 ET. Es independiente del modo horario general.")
+i_s1PenMin  = input.float(0.3, "Penetración mínima del nivel (USD/oz)", minval = 0.0, step = 0.1, group = G_S1,
+     tooltip = "Por debajo de esto no ha habido barrido, solo un roce. En unidades de precio, no en ticks, para que valga igual en MGC " +
+               "que en XAUUSD.")
+i_s1PenMax  = input.float(4.0, "Penetración máxima del nivel (USD/oz)", minval = 0.5, step = 0.5, group = G_S1,
+     tooltip = "Por encima de esto la ruptura es real y NO se opera, aunque la vela cierre de vuelta dentro. Es el filtro que separa " +
+               "'han cazado stops' de 'el precio se ha ido y ha hecho un retroceso'.")
+i_s1CieMax  = input.int(1, "Cierres fuera del nivel admitidos", minval = 0, maxval = 10, group = G_S1,
+     tooltip = "Cuántas velas seguidas pueden haber cerrado al otro lado del nivel antes de la vela que vuelve. Más cierres fuera " +
+               "significan ACEPTACIÓN del precio en el nivel nuevo, no barrido. Con 0 se exige que la vela del barrido sea la primera " +
+               "que pasa del nivel.")
+i_s1Margen  = input.float(0.5, "Margen del stop más allá de la mecha (USD/oz)", minval = 0.0, step = 0.1, group = G_S1)
+i_s1Obj     = input.string("R fijo", "Objetivo de S1",
+     options = ["R fijo", "VWAP del día", "VWAP del día, R fijo de reserva"], group = G_S1,
+     tooltip = "R FIJO es el defecto porque es el único de los tres cuya esperanza se puede interpretar sin modelar además dónde " +
+               "estaba el VWAP en cada operación.\n\n" +
+               "'VWAP DEL DÍA' no genera señal si el VWAP queda detrás de la entrada. La variante con reserva cae al R fijo en ese " +
+               "caso, lo que mezcla dos objetivos distintos en el mismo grupo de medición: úsala sabiéndolo.")
+i_s1R       = input.float(1.8, "R fijo del objetivo", minval = 0.5, maxval = 5.0, step = 0.1, group = G_S1,
+     tooltip = "1,8 está dentro del 1,5 a 2R de la especificación.")
+i_s1PorLado = input.bool(true, "Máximo una operación por lado y día", group = G_S1)
+
 const string G_REG = "Régimen de mercado"
 i_clasReg   = input.string("Rango del día / ATR", "Clasificador tendencia-rango",
      options = ["Rango del día / ATR", "ADX", "Persistencia respecto al VWAP"], group = G_REG,
@@ -776,6 +810,12 @@ bool refSwing = i_sweepRefs == "Todo (día, sesión, swing)"
 // Lo usan el disparador ASIA y la confluencia del score.
 var float asiaHiFijo = na
 var float asiaLoFijo = na
+//  Lo mismo para Londres. lonHi/lonLo conservan su último valor al cerrar la
+//  sesión, así que casi siempre coinciden; estas dos existen para que S1 no
+//  pueda leer por accidente un extremo de una sesión en curso si alguien
+//  cambia las cadenas de sesión y Londres acaba solapando la ventana de S1.
+var float lonHiFijo = na
+var float lonLoFijo = na
 
 // §4.2 · Rango asiático como dos niveles más del mismo mecanismo de barrido.
 bool swpAsiaLo = confBar and i_useAsia and not na(asiaLoFijo) and low  < asiaLoFijo and close > asiaLoFijo
@@ -869,6 +909,8 @@ if (not enAsia) and enAsia[1] and not na(asiaHi)
         line.delete(array.shift(midAsia))
 
 if (not enLon) and enLon[1] and not na(lonHi)
+    lonHiFijo := lonHi
+    lonLoFijo := lonLo
     if i_verRangos
         array.push(boxLon, box.new(lonX1, lonHi, bar_index, lonLo,
              border_color = color.new(color.orange, 60), bgcolor = color.new(color.orange, 94),
@@ -2096,6 +2138,122 @@ f_prioFuente(string estr) =>
              estr == "S3" ? 3 : 4
     p
 
+// --- S1 · barrido de liquidez (falsa ruptura) -------------------------------
+//  El precio pasa de un nivel de liquidez y la vela de 5m cierra de vuelta
+//  dentro. Entrada CONTRA la ruptura al cierre de esa vela, que es el idioma de
+//  siempre en este script: decisión sobre vela cerrada, nunca intravela.
+//
+//  Los tres filtros de la especificación son lo que distingue un barrido de las
+//  otras dos cosas que se le parecen:
+//   · penetración mínima  -> por debajo no hubo barrido, hubo un roce
+//   · penetración máxima  -> por encima la ruptura es real y no se opera
+//   · cierres fuera       -> más de N cierres al otro lado es ACEPTACIÓN del
+//                            precio en el nivel nuevo, no una caza de stops
+bool enVentS1 = not na(time(timeframe.period, i_s1Vent, "America/New_York"))
+
+//  Cuenta cuántas velas SEGUIDAS justo antes de esta cerraron al otro lado del
+//  nivel. Pine no tiene `break`, de ahí la bandera `sigue`.
+f_s1CierresFuera(float lvl, int dir) =>
+    int  n     = 0
+    bool sigue = true
+    for k = 1 to 10
+        if sigue
+            bool fuera = dir == 1 ? close[k] < lvl : close[k] > lvl
+            if fuera
+                n += 1
+            else
+                sigue := false
+    n
+
+//  ¿Esta vela barre `lvl` en la dirección `dir`? dir = 1 es barrido alcista: el
+//  precio perfora un nivel por DEBAJO y cierra por encima.
+f_s1Barre(float lvl, int dir) =>
+    bool ok = false
+    if not na(lvl)
+        float pen = dir == 1 ? lvl - low : high - lvl
+        bool  vuelve = dir == 1 ? close > lvl : close < lvl
+        ok := pen >= i_s1PenMin and pen <= i_s1PenMax and vuelve and
+             f_s1CierresFuera(lvl, dir) <= i_s1CieMax
+    ok
+
+var int s1DiaUp = na
+var int s1DiaDn = na
+
+if i_s1On and confBar and enVentS1 and not na(atr)
+    bool usaAsia = i_s1Refs != "Solo día anterior"
+    bool usaLon  = i_s1Refs == "Día anterior + Asia + Londres"
+
+    // Nivel barrido, en orden de importancia: día anterior, Asia, Londres.
+    float lvlUp = na
+    string nomUp = ""
+    if f_s1Barre(pdl, 1)
+        lvlUp  := pdl
+        nomUp  := "PDL"
+    else if usaAsia and f_s1Barre(asiaLoFijo, 1)
+        lvlUp  := asiaLoFijo
+        nomUp  := "mínimo de Asia"
+    else if usaLon and f_s1Barre(lonLoFijo, 1)
+        lvlUp  := lonLoFijo
+        nomUp  := "mínimo de Londres"
+
+    float lvlDn = na
+    string nomDn = ""
+    if f_s1Barre(pdh, -1)
+        lvlDn  := pdh
+        nomDn  := "PDH"
+    else if usaAsia and f_s1Barre(asiaHiFijo, -1)
+        lvlDn  := asiaHiFijo
+        nomDn  := "máximo de Asia"
+    else if usaLon and f_s1Barre(lonHiFijo, -1)
+        lvlDn  := lonHiFijo
+        nomDn  := "máximo de Londres"
+
+    // --- Candidato alcista
+    bool ladoUpLibre = (not i_s1PorLado) or na(s1DiaUp) or s1DiaUp != dayKey
+    if not na(lvlUp) and ladoUpLibre
+        float sr   = low - i_s1Margen
+        float stp  = math.floor(sr / f_tickPoints) * f_tickPoints
+        float rsk  = close - stp
+        float tgt  = na
+        bool  vale = rsk > 0
+        if vale
+            if i_s1Obj == "R fijo"
+                tgt := close + i_s1R * rsk
+            else
+                bool vwapDelante = not na(vwap) and vwap > close
+                if vwapDelante
+                    tgt := vwap
+                else if i_s1Obj == "VWAP del día, R fijo de reserva"
+                    tgt := close + i_s1R * rsk
+                else
+                    vale := false
+        if vale
+            f_addCand("S1", 1, stp, tgt,
+                 "S1 barrido de " + nomUp + " a " + str.tostring(lvlUp, format.mintick))
+
+    // --- Candidato bajista
+    bool ladoDnLibre = (not i_s1PorLado) or na(s1DiaDn) or s1DiaDn != dayKey
+    if not na(lvlDn) and ladoDnLibre
+        float sr   = high + i_s1Margen
+        float stp  = math.ceil(sr / f_tickPoints) * f_tickPoints
+        float rsk  = stp - close
+        float tgt  = na
+        bool  vale = rsk > 0
+        if vale
+            if i_s1Obj == "R fijo"
+                tgt := close - i_s1R * rsk
+            else
+                bool vwapDelante = not na(vwap) and vwap < close
+                if vwapDelante
+                    tgt := vwap
+                else if i_s1Obj == "VWAP del día, R fijo de reserva"
+                    tgt := close - i_s1R * rsk
+                else
+                    vale := false
+        if vale
+            f_addCand("S1", -1, stp, tgt,
+                 "S1 barrido de " + nomDn + " a " + str.tostring(lvlDn, format.mintick))
+
 // =============================================================================
 //  8 · CONSTRUCCIÓN Y EJECUCIÓN DE LA OPERACIÓN
 // =============================================================================
@@ -2427,6 +2585,13 @@ if setDir != 0 and confBar and not na(atr)
             // Un único SB por ventana y día (§4.1).
             if esSBok
                 sbDiaHecho := dayKey
+            // S1 · una por lado y día. Se marca AQUÍ, con la orden puesta: un
+            // candidato que la máscara veta no gasta el lado.
+            if setEstr == "S1"
+                if isLong
+                    s1DiaUp := dayKey
+                else
+                    s1DiaDn := dayKey
             tradesToday += 1
             // Contador por fuente: lo leen el cupo propio y el reparto
             // rotatorio. Se incrementa AQUÍ, cuando la orden ya está puesta,
