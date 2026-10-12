@@ -354,6 +354,54 @@ i_showSig   = input.bool(true, "Etiquetas COMPRA / VENTA",      group = G_VIS,
      tooltip = "Marca en el gráfico la vela que dispara la señal: COMPRA en verde bajo la vela, VENTA en rojo encima. " +
                "Al pasar el ratón por encima se ven entrada, stop, objetivo, contratos y motivo.")
 
+// --- Régimen de mercado · clasificador tendencia / rango (v2.8) -------------
+//  Existe porque S2 (pullback en día tendencial) y S3 (fade de bandas en día de
+//  rango) se anulan entre sí sin él: en el mismo día, una compra el retroceso y
+//  la otra vende el extremo. Con el clasificador son MUTUAMENTE EXCLUYENTES por
+//  construcción, no por un `and not` pegado después.
+const string G_REG = "Régimen de mercado"
+i_clasReg   = input.string("Rango del día / ATR", "Clasificador tendencia-rango",
+     options = ["Rango del día / ATR", "ADX", "Persistencia respecto al VWAP"], group = G_REG,
+     tooltip = "RANGO DEL DÍA / ATR es el defecto. Se conoce a cada vela, es adimensional —así que el mismo umbral vale en MGC y en " +
+               "XAUUSD— y no tiene parámetro de suavizado que ajustar.\n\n" +
+               "ADX clasifica tarde: en 5 minutos arrastra entre 15 y 20 velas de retardo, así que dictamina 'tendencia' cuando el " +
+               "movimiento ya ha ocurrido. Está disponible para comparar, no porque lo recomiende.\n\n" +
+               "PERSISTENCIA RESPECTO AL VWAP mide cuántas velas del día han cerrado del mismo lado. Es más robusta al ruido, pero no " +
+               "dice nada en los primeros 30 minutos, que es cuando S2 quiere entrar.")
+i_regRango  = input.float(1.2, "Tendencia si el rango del día supera (x ADR)", minval = 0.3, maxval = 3.0, step = 0.1, group = G_REG,
+     tooltip = "Rango del día de trading dividido por el ADR(20). Por encima de este múltiplo el día se considera tendencial.")
+i_regDespl  = input.float(0.5, "…y el desplazamiento neto llega a esta fracción del rango", minval = 0.0, maxval = 1.0, step = 0.05, group = G_REG,
+     tooltip = "ESTE TÉRMINO ES UN AÑADIDO MÍO, no estaba en la especificación. El rango por sí solo no distingue tendencia de ruido: " +
+               "un día que da bandazos de 1,3 ADR y cierra donde abrió es un día de RANGO con swings grandes, y el rango solo lo " +
+               "llamaría tendencia. El desplazamiento neto |cierre − apertura| / rango lo separa.\n\n" +
+               "Ponlo a 0 para quedarte con el criterio tal como lo especificaste, solo rango contra ATR.")
+i_adxLen    = input.int(14, "ADX · periodo", minval = 2, maxval = 50, group = G_REG)
+i_adxUmbral = input.float(22.0, "ADX · umbral de tendencia", minval = 10.0, maxval = 50.0, step = 0.5, group = G_REG)
+i_persUmbr  = input.float(0.70, "Persistencia · fracción de velas al mismo lado del VWAP", minval = 0.5, maxval = 1.0, step = 0.05, group = G_REG)
+i_regMinVel = input.int(12, "Velas mínimas del día antes de clasificar", minval = 3, maxval = 200, group = G_REG,
+     tooltip = "Antes de esta cuenta el día queda SIN CLASIFICAR y ni S2 ni S3 pueden operar. Sin este mínimo, a las 18:05 ET todos " +
+               "los días parecen de rango y S3 operaría cada madrugada.")
+
+// --- Reparto de cupo entre estrategias (conflicto 3) ------------------------
+//  Con seis fuentes de señal, la primera que dispare se lleva el cupo diario.
+//  Esto es el mecanismo para repartirlo. TODO A 0 Y CON FVG PRIMERO, O SEA QUE
+//  POR DEFECTO EL COMPORTAMIENTO NO CAMBIA.
+const string G_CUP = "Reparto de cupo"
+i_prioridad = input.string("FVG primero", "Prioridad cuando varias fuentes disparan",
+     options = ["FVG primero", "Estrategias nuevas primero", "Por orden S1-S4 y luego FVG"], group = G_CUP,
+     tooltip = "Solo decide quién gana cuando dos fuentes disparan en la MISMA vela. 'FVG primero' reproduce el comportamiento " +
+               "anterior a la v2.8.")
+i_cupoS1    = input.int(0, "Cupo diario propio · S1 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP)
+i_cupoS2    = input.int(0, "Cupo diario propio · S2 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP)
+i_cupoS3    = input.int(0, "Cupo diario propio · S3 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP)
+i_cupoS4    = input.int(0, "Cupo diario propio · S4 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP,
+     tooltip = "Un cupo propio ACOTA esa estrategia, no le reserva sitio: el límite diario global sigue mandando por encima. Con 0 la " +
+               "estrategia no tiene tope propio y compite solo por el cupo global.")
+i_conflicto = input.string("No operar ninguna", "Dos estrategias en sentidos opuestos la misma vela",
+     options = ["No operar ninguna", "Manda la de mayor prioridad"], group = G_CUP,
+     tooltip = "Por defecto no se opera. Dos sistemas que se contradicen no es una señal débil: es ausencia de señal, y el contador de " +
+               "conflictos de la tabla de diagnóstico dice cuántas veces ha pasado.")
+
 // =============================================================================
 //  2 · VENTANA, RELOJ Y CONTADOR DIARIO
 // =============================================================================
@@ -825,6 +873,62 @@ if (not enLon) and enLon[1] and not na(lonHi)
              border_width = 1))
     while array.size(boxLon) > i_rangosDias
         box.delete(array.shift(boxLon))
+
+// =============================================================================
+//  4c · RÉGIMEN DEL DÍA · tendencia o rango (v2.8)
+// =============================================================================
+//  Un solo valor por vela: 1 tendencia, -1 rango, 0 sin clasificar. S2 solo
+//  puede operar con 1 y S3 solo con -1, así que no pueden coincidir nunca.
+//
+//  Todo se mide sobre el DÍA DE TRADING de las 18:00 ET (la misma clave que
+//  HOD/LOD), no sobre el día natural ni sobre la ventana: así el régimen no
+//  cambia de significado al cambiar el modo horario.
+//
+//  Las tres series con estado interno se calculan SIEMPRE en ámbito global.
+//  Meter un ta.dmi o un contador dentro de un bloque condicional lo evalúa de
+//  forma intermitente y su historial sale mal, y eso no da error de
+//  compilación: solo resultados silenciosamente equivocados.
+var float cmeOpen  = na
+var int   velasDia = 0
+var int   velasArr = 0
+var int   velasAbj = 0
+if nuevoCme
+    cmeOpen  := open
+    velasDia := 0
+    velasArr := 0
+    velasAbj := 0
+if confBar
+    velasDia += 1
+    if not na(vwap)
+        if close > vwap
+            velasArr += 1
+        else if close < vwap
+            velasAbj += 1
+
+[regDiP, regDiM, regAdx] = ta.dmi(i_adxLen, i_adxLen)
+
+float regRangoDia = na(hod) or na(lod) ? na : hod - lod
+float regRatio    = na(regRangoDia) or na(adr20) or adr20 <= 0 ? na : regRangoDia / adr20
+float regDespl    = na(regRangoDia) or regRangoDia <= 0 or na(cmeOpen) ? na :
+     math.abs(close - cmeOpen) / regRangoDia
+float regPers     = velasDia <= 0 ? na :
+     math.max(velasArr, velasAbj) / math.max(velasDia, 1)
+
+int regimen = 0
+if velasDia >= i_regMinVel
+    if i_clasReg == "ADX"
+        regimen := na(regAdx) ? 0 : regAdx >= i_adxUmbral ? 1 : -1
+    else if i_clasReg == "Persistencia respecto al VWAP"
+        regimen := na(regPers) ? 0 : regPers >= i_persUmbr ? 1 : -1
+    else
+        // Rango del día contra el ADR, Y desplazamiento neto. Con i_regDespl a
+        // 0 el segundo término no exige nada y queda el criterio de la
+        // especificación tal cual.
+        bool okRango = not na(regRatio) and regRatio >= i_regRango
+        bool okDespl = i_regDespl <= 0.0 or (not na(regDespl) and regDespl >= i_regDespl)
+        regimen := na(regRatio) ? 0 : (okRango and okDespl) ? 1 : -1
+
+string regTxt = regimen == 1 ? "TENDENCIA" : regimen == -1 ? "RANGO" : "sin clasificar"
 
 // =============================================================================
 //  5 · FAIR VALUE GAPS
@@ -2622,7 +2726,7 @@ if barstate.islast
 f_biasTxt(int b) => b ==  1 ? "alcista" : b == -1 ? "bajista" : "rango"
 f_biasCol(int b) => b ==  1 ? color.new(color.teal, 0) : b == -1 ? color.new(color.maroon, 0) : color.new(color.gray, 0)
 
-const int N_DIAG = 18
+const int N_DIAG = 22
 var table diag = table.new(position.top_right, 2, N_DIAG, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50))
 
 // Escribe una fila y devuelve la siguiente libre. Si no hay dato, no escribe y
@@ -2925,6 +3029,24 @@ if i_showTable and verExtras and barstate.islast
     else if not na(hSlot)
         hTxt := str.tostring(hSlot) + "h ET: muestra " + str.tostring(array.get(horaN, hSlot)) +
              "/" + str.tostring(i_horaMinN) + ", sin vetar"
+    // §4c · régimen del día, con el dato crudo al lado para poder ajustar el
+    // umbral con números del gráfico en vez de a ojo.
+    string regFila = regTxt
+    if i_clasReg == "ADX"
+        regFila += na(regAdx) ? "" : " · ADX " + str.tostring(regAdx, "#.#") +
+             " (umbral " + str.tostring(i_adxUmbral, "#.#") + ")"
+    else if i_clasReg == "Persistencia respecto al VWAP"
+        regFila += na(regPers) ? "" : " · " + str.tostring(100 * regPers, "#") + "% al mismo lado"
+    else
+        regFila += na(regRatio) ? "" : " · " + str.tostring(regRatio, "#.##") + "x ADR" +
+             (na(regDespl) ? "" : " · despl " + str.tostring(100 * regDespl, "#") + "%")
+    if velasDia < i_regMinVel
+        regFila := "sin clasificar · " + str.tostring(velasDia) + "/" +
+             str.tostring(i_regMinVel) + " velas"
+    r := f_filaDiag(r, "Régimen del día", regFila,
+         regimen == 1 ? color.new(color.teal, 0) :
+         regimen == -1 ? color.new(color.orange, 0) : color.new(color.gray, 20))
+
     r := f_filaDiag(r, "Perfil horario", hTxt,
          f_horaDebil() ? color.new(color.orange, 0) : chart.fg_color)
 
