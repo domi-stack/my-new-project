@@ -890,11 +890,15 @@ const int N_PNL = 10
 var table pnl = table.new(position.top_right, 2, N_PNL, border_width = 1,
      frame_width = 1, frame_color = color.new(color.gray, 50))
 
+//  Escribe una fila y devuelve la siguiente libre (v5.1 §6). Una fila vacía en
+//  una tabla de Pine sigue ocupando alto, así que "ocultar" es necesariamente
+//  "no escribir y correr las de abajo".
 f_fila(int r, string k, string v, color cv) =>
     table.cell(pnl, 0, r, k, text_size = size.small, text_halign = text.align_left,
          text_color = color.new(color.gray, 20))
     table.cell(pnl, 1, r, v, text_size = size.small, text_halign = text.align_right,
          text_color = cv)
+    r + 1
 
 if i_verPanel and barstate.islast
     string estTxt = "—"
@@ -906,45 +910,48 @@ if i_verPanel and barstate.islast
     else if hayVigilar
         estTxt := "VIGILAR"
 
-    f_fila(0, "Sesgo",   sesgoTxt, sesgoCol)
-    f_fila(1, "Sesión",  sesTxt,   color.new(color.gray, 20))
-    f_fila(2, "Estado",  estTxt + (esChop ? " · chop" : ""), estCol)
+    int r = 0
+    r := f_fila(r, "Sesgo",  sesgoTxt, sesgoCol)
+    r := f_fila(r, "Sesión", sesTxt,   color.new(color.gray, 20))
+    r := f_fila(r, "Estado", estTxt + (esChop ? " · chop" : ""), estCol)
 
-    if na(vivo)
-        f_fila(3, "Score", "—", color.new(color.gray, 40))
-        f_fila(4, "Niveles", "—", color.new(color.gray, 40))
-        f_fila(5, "R:R", "—", color.new(color.gray, 40))
-        f_fila(6, "Contratos", "—", color.new(color.gray, 40))
-    else
-        f_fila(3, "Score", str.tostring(vivo.score) + " " + f_etiqScore(vivo.score),
+    //  Sin setup vivo estas cinco filas no tienen nada que decir, y una columna
+    //  de guiones ocupa el mismo sitio que un dato. Se omiten (§6).
+    if not na(vivo)
+        r := f_fila(r, "Score", str.tostring(vivo.score) + " " + f_etiqScore(vivo.score),
              f_colScore(vivo.score))
         // §1.1 · en spot se muestran también los precios equivalentes de MGC.
         float bs = esSpot ? i_basis : 0.0
-        f_fila(4, esSpot and bs != 0 ? "E/SL/TP1 (MGC)" : "E/SL/TP1",
+        r := f_fila(r, esSpot and bs != 0 ? "E/SL/TP1 (MGC)" : "E/SL/TP1",
              str.tostring(vivo.entrada + bs, format.mintick) + " / " +
              str.tostring(vivo.sl + bs, format.mintick) + " / " +
              (na(vivo.tp1) ? "—" : str.tostring(vivo.tp1 + bs, format.mintick)),
              color.new(color.gray, 10))
-        f_fila(5, "R:R", na(vivo.rr) ? "—" : str.tostring(vivo.rr, "#.##") + "R",
+        r := f_fila(r, "R:R", na(vivo.rr) ? "—" : str.tostring(vivo.rr, "#.##") + "R",
              na(vivo.rr) ? color.new(color.gray, 40) :
              vivo.rr >= i_rrMin ? color.new(color.green, 0) : color.new(color.orange, 0))
         // Contratos: informativo, nunca bloquea.
         float riesgoPts = math.abs(vivo.entrada - vivo.sl)
         int ctr = riesgoPts > 0 ? int(math.floor(i_riesgo / (riesgoPts * i_puntoUSD))) : 0
-        f_fila(6, "Contratos", str.tostring(ctr) + " MGC", color.new(color.gray, 10))
+        r := f_fila(r, "Contratos", str.tostring(ctr) + " MGC", color.new(color.gray, 10))
+        r := f_fila(r, "Antigüedad",
+             str.tostring(bar_index - (vivo.estado == 3 ? vivo.barDisparo : vivo.barArmado)) + " velas",
+             color.new(color.gray, 10))
 
     float dv = na(vwapSes) or nz(atr, 0) <= 0 ? na : (close - vwapSes) / atr
-    f_fila(7, "Dist. VWAP", na(dv) ? "—" : str.tostring(dv, "+#.#") + " ATR",
+    r := f_fila(r, "Dist. VWAP", na(dv) ? "—" : str.tostring(dv, "+#.#") + " ATR",
          na(dv) ? color.new(color.gray, 40) :
          math.abs(dv) > 2 ? color.new(color.orange, 0) : color.new(color.gray, 10))
-    f_fila(8, "Antigüedad", na(vivo) ? "—" :
-         str.tostring(bar_index - (vivo.estado == 3 ? vivo.barDisparo : vivo.barArmado)) + " velas",
-         color.new(color.gray, 10))
 
-    f_fila(9, "Nivel ↑ / ↓",
+    r := f_fila(r, "Nivel ↑ / ↓",
          (nomArriba == "" ? "—" : nomArriba + " " + str.tostring(nivArriba, format.mintick)) +
          "  ·  " + (nomAbajo == "" ? "—" : nomAbajo + " " + str.tostring(nivAbajo, format.mintick)),
          color.new(color.gray, 10))
+
+    //  Las filas que esta pasada no ha usado se borran: la tabla es `var` y una
+    //  celda escrita cuando sí había setup seguiría a la vista.
+    if r <= N_PNL - 1
+        table.clear(pnl, 0, r, 1, N_PNL - 1)
 
 
 // Avisos que no pueden pasar desapercibidos.
@@ -1017,3 +1024,10 @@ if disparoS and not na(sS)
 //      siguen legibles.
 //  8 · MINIMAL. Activar el modo y comprobar que quedan panel, dos niveles y la
 //      señal activa, y nada más.
+//  9 · COMPARAR EN BAR REPLAY UN DÍA COMPLETO: rombos y flechas deben caer en
+//      la misma vela que en el histórico.
+//      Es la prueba del cambio de la v5.1 §2. lookahead_on con la expresión
+//      desplazada hace coincidir las dos series, y esta es la forma de verlo:
+//      si un rombo cae una vela de 15m antes o después que en el histórico, el
+//      desfase sigue ahí. Es más estrecha que la prueba 1, que mira si algo
+//      repinta; esta mira si histórico y vivo son la MISMA serie.
