@@ -242,9 +242,18 @@ f_estructura(int pl, int pr, bool shift) =>
     [shift ? nz(b[1], 0) : b, shift ? sh1[1] : sh1, shift ? sl1[1] : sl1]
 
 //  shift = true, o sea que los tres valores que devuelve salen desplazados.
+//  Tres marcos (v5.2 §B2): el elegido en los inputs, 1H y 4H. El sesgo pasa de
+//  mirar una sola estructura a mirar tres, que es lo que distingue un retroceso
+//  dentro de una tendencia de 4H de un giro de verdad.
 [bEstrRaw, swHiE, swLoE] = request.security(syminfo.tickerid, i_tfEstr,
      f_estructura(i_pivL, i_pivR, true), lookahead = barmerge.lookahead_on)
+[bE1Raw,   swHi1, swLo1] = request.security(syminfo.tickerid, "60",
+     f_estructura(i_pivL, i_pivR, true), lookahead = barmerge.lookahead_on)
+[bE4Raw,   swHi4, swLo4] = request.security(syminfo.tickerid, "240",
+     f_estructura(i_pivL, i_pivR, true), lookahead = barmerge.lookahead_on)
 int bEstr = nz(bEstrRaw)
+int bE1   = nz(bE1Raw)
+int bE4   = nz(bE4Raw)
 
 // Estructura y CHoCH en el marco de setup, para el requisito de contra tendencia.
 [bSetup, swHi, swLo] = f_estructura(i_pivL, i_pivR, false)
@@ -266,9 +275,20 @@ if conf
         tendLoc := -1
         rotoLo  := swLo
 
+//  CINCO votos (v5.2 §B3): VWAP, apertura diaria y las estructuras de 15m, 1H
+//  y 4H. Con cinco votos el umbral sube a 3, que sigue siendo mayoría simple.
 int votos = (close > vwapSes ? 1 : close < vwapSes ? -1 : 0) +
-     (na(aperDia) ? 0 : close > aperDia ? 1 : close < aperDia ? -1 : 0) + bEstr
-int sesgo = votos >= 2 ? 1 : votos <= -2 ? -1 : 0
+     (na(aperDia) ? 0 : close > aperDia ? 1 : close < aperDia ? -1 : 0) +
+     bEstr + bE1 + bE4
+int sesgo = votos >= 3 ? 1 : votos <= -3 ? -1 : 0
+//  §B7 · una flecha por voto, para leer el contexto sin abrir nada.
+f_fl(int b) => b == 1 ? "▲" : b == -1 ? "▼" : "•"
+int votoVwap = close > vwapSes ? 1 : close < vwapSes ? -1 : 0
+string ctxTxt = "4H " + f_fl(bE4) + " · 1H " + f_fl(bE1) + " · 15m " + f_fl(bEstr) +
+     " · VWAP " + f_fl(votoVwap)
+//  Versión compacta para la segunda línea de la etiqueta del disparo (§C7).
+string ctxCorto = "4H" + f_fl(bE4) + " 1H" + f_fl(bE1) + " 15m" + f_fl(bEstr)
+
 string sesgoTxt = sesgo == 1 ? "ALCISTA" : sesgo == -1 ? "BAJISTA" : "NEUTRO"
 color  sesgoCol = sesgo == 1 ? color.new(color.green, 0) :
      sesgo == -1 ? color.new(color.red, 0) : color.new(color.gray, 0)
@@ -284,6 +304,45 @@ bool enNY   = not na(time(timeframe.period, "0800-1700", "America/New_York"))
 int  sesIdx = enNY ? 2 : enLon ? 1 : enAsia ? 0 : 3
 string sesTxt = sesIdx == 2 ? "NY" : sesIdx == 1 ? "Londres" : sesIdx == 0 ? "Asia" : "—"
 
+// --- Rangos de Asia y de Londres (v5.2 §B5) ---------------------------------
+//  Asia 20:00-02:00 ET, Londres 02:00-08:00 ET. Se acumulan SOLO en velas
+//  confirmadas y se FIJAN al cerrar la sesión: mientras la sesión está abierta
+//  su extremo se mueve, y un nivel que se mueve no es un nivel. El acumulador y
+//  el valor fijado son por tanto dos variables distintas.
+//
+//  Se declaran aquí, antes de las zonas, porque los leen los barridos, el
+//  inventario de niveles y las confluencias, y en Pine todo tiene que estar
+//  declarado antes de usarse.
+var float asiaAcH = na
+var float asiaAcL = na
+var float lonAcH  = na
+var float lonAcL  = na
+var float asiaH   = na
+var float asiaL   = na
+var float lonH    = na
+var float lonL    = na
+
+if conf
+    if enAsia and not enAsia[1]
+        asiaAcH := high
+        asiaAcL := low
+    else if enAsia
+        asiaAcH := math.max(nz(asiaAcH, high), high)
+        asiaAcL := math.min(nz(asiaAcL, low),  low)
+    if enAsia[1] and not enAsia
+        asiaH := asiaAcH
+        asiaL := asiaAcL
+
+    if enLon and not enLon[1]
+        lonAcH := high
+        lonAcL := low
+    else if enLon
+        lonAcH := math.max(nz(lonAcH, high), high)
+        lonAcL := math.min(nz(lonAcL, low),  low)
+    if enLon[1] and not enLon
+        lonH := lonAcH
+        lonL := lonAcL
+
 // =============================================================================
 //  6 · ZONAS FVG en 15m, 1H y diario
 // =============================================================================
@@ -292,8 +351,8 @@ type Zona
     float  bot
     float  mid
     int    dir        //  1 demanda · -1 oferta
-    string tf         // "15m" / "1H" / "D"
-    int    peso       // 4 / 7 / 10 según marco, para el score
+    string tf         // "15m" / "1H" / "4H" / "D"
+    int    peso       // 4 / 7 / 9 / 10 según marco, para el score
     bool   viva
     box    bx
 
@@ -314,6 +373,8 @@ f_fvgHtf(int atrLen, float minMult) =>
      f_fvgHtf(i_atrLen, i_fvgMin), lookahead = barmerge.lookahead_on)
 [t60, bu60, bu60T, bu60B, be60, be60T, be60B] = request.security(syminfo.tickerid, "60",
      f_fvgHtf(i_atrLen, i_fvgMin), lookahead = barmerge.lookahead_on)
+[t240, bu240, bu240T, bu240B, be240, be240T, be240B] = request.security(syminfo.tickerid, "240",
+     f_fvgHtf(i_atrLen, i_fvgMin), lookahead = barmerge.lookahead_on)
 [tD,  buD,  buDT,  buDB,  beD,  beDT,  beDB]  = request.security(syminfo.tickerid, "1D",
      f_fvgHtf(i_atrLen, i_fvgMin), lookahead = barmerge.lookahead_on)
 
@@ -321,9 +382,10 @@ f_fvgHtf(int atrLen, float minMult) =>
 //  ta.change o un ta.sma dentro de un bloque condicional lo evalúa de forma
 //  intermitente y su historial sale mal. Es un fallo que no da error de
 //  compilación, solo resultados silenciosamente equivocados.
-bool nuevo15 = not na(t15) and ta.change(t15) != 0
-bool nuevo60 = not na(t60) and ta.change(t60) != 0
-bool nuevoDd = not na(tD)  and ta.change(tD)  != 0
+bool nuevo15 = not na(t15)  and ta.change(t15)  != 0
+bool nuevo60 = not na(t60)  and ta.change(t60)  != 0
+bool nuevo4  = not na(t240) and ta.change(t240) != 0
+bool nuevoDd = not na(tD)   and ta.change(tD)   != 0
 float volSma = ta.sma(volume, 20)
 
 f_addZona(float top, float bot, int dir, string tf, int peso) =>
@@ -350,6 +412,13 @@ if conf and not na(atr)
             f_addZona(bu60T, bu60B, 1, "1H", 7)
         if be60
             f_addZona(be60T, be60B, -1, "1H", 7)
+    //  §B1 · el 4H entra con peso 9: por encima del 1H y justo por debajo del
+    //  diario, que es el sitio que le corresponde en la jerarquía.
+    if nuevo4
+        if bu240
+            f_addZona(bu240T, bu240B, 1, "4H", 9)
+        if be240
+            f_addZona(be240T, be240B, -1, "4H", 9)
     if nuevoDd
         if buD
             f_addZona(buDT, buDB, 1, "D", 10)
@@ -391,6 +460,17 @@ f_nivelesCandidatos() =>
         array.push(a, Nivel.new(pdh, "PDH", -1, false))
     if not na(pdl)
         array.push(a, Nivel.new(pdl, "PDL", 1, false))
+    //  §B5b · los extremos ya cerrados de Asia y Londres son niveles de
+    //  referencia como el día anterior, y en oro son de los que más barridos
+    //  dan: la sesión asiática deja el rango que Londres rompe.
+    if not na(asiaH)
+        array.push(a, Nivel.new(asiaH, "Asia H", -1, false))
+    if not na(asiaL)
+        array.push(a, Nivel.new(asiaL, "Asia L", 1, false))
+    if not na(lonH)
+        array.push(a, Nivel.new(lonH, "Londres H", -1, false))
+    if not na(lonL)
+        array.push(a, Nivel.new(lonL, "Londres L", 1, false))
     if i_pasoRed > 0
         float base = math.floor(close / i_pasoRed) * i_pasoRed
         array.push(a, Nivel.new(base, str.tostring(base, "#"), 0, false))
@@ -479,10 +559,43 @@ if barstate.islast
 // =============================================================================
 //  Mecha que supera un extremo y cierre de vuelta dentro. Es el "alguien ha
 //  cazado stops y no había continuación" que justifica buscar la vuelta.
-bool barrUp = conf and ((not na(pdl)  and low  < pdl  and close > pdl) or
-     (not na(swLo) and low  < swLo and close > swLo))
-bool barrDn = conf and ((not na(pdh)  and high > pdh  and close < pdh) or
-     (not na(swHi) and high > swHi and close < swHi))
+//  §B5a y §B6 · se barre contra PDH/PDL, contra los extremos de Asia y de
+//  Londres y contra el swing local. Y se guarda QUÉ nivel se barrió: no es lo
+//  mismo barrer el mínimo de Asia que un swing de hace tres velas, y hasta
+//  ahora el gráfico no lo decía.
+//
+//  El orden del encadenado es el orden de importancia del nivel, no el de
+//  comodidad: si una misma vela barre dos niveles manda el más fuerte.
+var string barrUpNom = ""
+var string barrDnNom = ""
+bool barrUp = false
+bool barrDn = false
+if conf
+    if not na(pdl) and low < pdl and close > pdl
+        barrUp    := true
+        barrUpNom := "PDL"
+    else if not na(asiaL) and low < asiaL and close > asiaL
+        barrUp    := true
+        barrUpNom := "Asia L"
+    else if not na(lonL) and low < lonL and close > lonL
+        barrUp    := true
+        barrUpNom := "Londres L"
+    else if not na(swLo) and low < swLo and close > swLo
+        barrUp    := true
+        barrUpNom := "swing"
+
+    if not na(pdh) and high > pdh and close < pdh
+        barrDn    := true
+        barrDnNom := "PDH"
+    else if not na(asiaH) and high > asiaH and close < asiaH
+        barrDn    := true
+        barrDnNom := "Asia H"
+    else if not na(lonH) and high > lonH and close < lonH
+        barrDn    := true
+        barrDnNom := "Londres H"
+    else if not na(swHi) and high > swHi and close < swHi
+        barrDn    := true
+        barrDnNom := "swing"
 
 bool barrUpRec = nz(ta.barssince(barrUp), 999999) <= i_velasBarr
 bool barrDnRec = nz(ta.barssince(barrDn), 999999) <= i_velasBarr
@@ -528,18 +641,38 @@ f_confluencias(float precio) =>
             n += 1
         if not na(aperDia) and math.abs(precio - aperDia) <= tol
             n += 1
+        //  §B5c · Asia y Londres cuentan igual que los demás. El tope de dos
+        //  sigue estando, así que esto no infla el score: solo cambia cuáles
+        //  son las dos confluencias que lo alcanzan.
+        if not na(asiaH) and math.abs(precio - asiaH) <= tol
+            n += 1
+        if not na(asiaL) and math.abs(precio - asiaL) <= tol
+            n += 1
+        if not na(lonH) and math.abs(precio - lonH) <= tol
+            n += 1
+        if not na(lonL) and math.abs(precio - lonL) <= tol
+            n += 1
         if i_pasoRed > 0 and math.abs(precio - math.round(precio / i_pasoRed) * i_pasoRed) <= tol
             n += 1
     math.min(n, 2)
+
+//  §B4 · un marco a favor vale entero, en rango la mitad, en contra cero.
+f_alin(int b, int dir) => b == dir ? 1.0 : b == 0 ? 0.5 : 0.0
 
 f_score(int dir, float entrada, float sl, float tp1, int pesoZona, float precioZona) =>
     int    s   = 0
     string det = ""
 
-    // 1 · Alineación con el sesgo
-    int pS = sesgo == dir ? w_sesgo : sesgo == 0 ? int(w_sesgo * 0.4) : 0
+    // 1 · Alineación multimarco (§B4). Sustituye al componente de sesgo y se
+    //     reparte el MISMO w_sesgo entre los tres marcos: 4H 40 %, 1H 32 %,
+    //     15m 28 %. El peso total no cambia; lo que cambia es que ya no es un
+    //     sí/no sobre un voto agregado, sino quién está a favor. Un setup con
+    //     el 4H a favor y el 15m en contra ya no puntúa igual que al revés.
+    int pS = int(math.round(w_sesgo * (0.40 * f_alin(bE4,   dir) +
+         0.32 * f_alin(bE1,   dir) +
+         0.28 * f_alin(bEstr, dir))))
     s   += pS
-    det += "sesgo " + str.tostring(pS)
+    det += "alineación " + str.tostring(pS) + " (" + f_fl(bE4) + f_fl(bE1) + f_fl(bEstr) + ")"
 
     // 2 · Calidad de la zona: marco + confluencia
     int pMarco = int(math.round(pesoZona / 10.0 * (w_zona * 0.5)))
@@ -886,7 +1019,7 @@ plot(i_minimal ? na : vwapSes, "VWAP", color = color.new(color.blue, 30), linewi
 //  con esa muestra no está medida. Las arrays de calibración SIGUEN estando,
 //  porque las usa 'Desactivar setups con esperanza negativa': lo que se quita
 //  es publicar la cifra, no medirla.
-const int N_PNL = 10
+const int N_PNL = 11
 var table pnl = table.new(position.top_right, 2, N_PNL, border_width = 1,
      frame_width = 1, frame_color = color.new(color.gray, 50))
 
@@ -912,6 +1045,9 @@ if i_verPanel and barstate.islast
 
     int r = 0
     r := f_fila(r, "Sesgo",  sesgoTxt, sesgoCol)
+    //  §B7 · el desglose del sesgo: con cinco votos, "NEUTRO" a secas no dice
+    //  si falta uno o si están repartidos.
+    r := f_fila(r, "Contexto", ctxTxt, color.new(color.gray, 10))
     r := f_fila(r, "Sesión", sesTxt,   color.new(color.gray, 20))
     r := f_fila(r, "Estado", estTxt + (esChop ? " · chop" : ""), estCol)
 
