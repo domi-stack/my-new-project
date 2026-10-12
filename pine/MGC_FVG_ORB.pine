@@ -454,6 +454,27 @@ i_s4Margen  = input.float(0.5, "Margen del stop (USD/oz)", minval = 0.0, step = 
 i_s4R       = input.float(1.8, "R fijo del objetivo", minval = 0.5, maxval = 5.0, step = 0.1, group = G_S4)
 i_s4UnaPorN = input.bool(true, "Máximo una operación por publicación", group = G_S4)
 
+// --- S5 · sesgo horario (FILTRO, no sistema) --------------------------------
+//  HIPÓTESIS SIN COMPROBAR: "el oro sube en horario asiático y cae el resto del
+//  día". No dispara nunca nada por su cuenta; solo inclina la puntuación de los
+//  candidatos de S1 y S2, que es lo que pedía la especificación.
+const string G_S5 = "S5 · Sesgo horario"
+i_s5On      = input.bool(false, "Activar S5 · sesgo horario", group = G_S5,
+     tooltip = "APAGADO. NUNCA DISPARA NADA: solo suma o resta puntos a los candidatos de S1 y S2. Si no pones además un mínimo de " +
+               "puntuación, encenderlo no cambia ninguna decisión, solo la puntuación que se ve.")
+i_s5Modo    = input.string("Medido en el gráfico", "De dónde sale el sesgo de la hora",
+     options = ["Medido en el gráfico", "Hipótesis fija (Asia alcista)"], group = G_S5,
+     tooltip = "MEDIDO EN EL GRÁFICO es el defecto: se acumula la deriva (cierre − apertura) de cada hora ET sobre los datos que estés " +
+               "usando y se toma su signo, con muestra mínima. Así la hipótesis se COMPRUEBA en vez de asumirse, y si en tus datos el " +
+               "oro no sube en Asia, el filtro no se lo inventa.\n\n" +
+               "HIPÓTESIS FIJA aplica el enunciado tal cual: alcista en la sesión asiática, bajista el resto. Úsalo para contrastar " +
+               "contra lo medido, no como verdad.")
+i_s5MinN    = input.int(20, "Muestra mínima por hora antes de aplicar el sesgo", minval = 3, maxval = 500, group = G_S5)
+i_s5Peso    = input.int(15, "Puntos que suma o resta el sesgo", minval = 0, maxval = 50, group = G_S5)
+i_s5MinScr  = input.int(0, "Puntuación mínima del candidato (0 = no descarta)", minval = 0, maxval = 100, group = G_S5,
+     tooltip = "ESTE es el input que convierte S5 en un filtro de verdad. Con 0, S5 solo describe. Un candidato arranca en 50, así que " +
+               "con peso 15 un candidato en contra del sesgo baja a 35: pon 40 aquí para descartarlo y 0 para no descartar nada.")
+
 const string G_REG = "Régimen de mercado"
 i_clasReg   = input.string("Rango del día / ATR", "Clasificador tendencia-rango",
      options = ["Rango del día / ATR", "ADX", "Persistencia respecto al VWAP"], group = G_REG,
@@ -483,11 +504,14 @@ i_regMinVel = input.int(12, "Velas mínimas del día antes de clasificar", minva
 //  POR DEFECTO EL COMPORTAMIENTO NO CAMBIA.
 const string G_CUP = "Reparto de cupo"
 i_prioridad = input.string("FVG primero", "Prioridad cuando varias fuentes disparan",
-     options = ["FVG primero", "Estrategias nuevas primero", "La que menos haya operado hoy"], group = G_CUP,
+     options = ["FVG primero", "Estrategias nuevas primero", "La que menos haya operado hoy",
+     "Por puntuación del candidato"], group = G_CUP,
      tooltip = "Solo decide quién gana cuando dos fuentes disparan en la MISMA vela. 'FVG primero' reproduce el comportamiento " +
                "anterior a la v2.8.\n\n" +
                "'La que menos haya operado hoy' es un reparto rotatorio: evita que una sola fuente se coma el cupo todos los días, " +
-               "que es el riesgo real de tener seis. Con empate manda el FVG.")
+               "que es el riesgo real de tener seis. Con empate manda el FVG.\n\n" +
+               "'Por puntuación del candidato' usa la puntuación que S5 inclina. Con S5 apagado todos los candidatos valen 50, así que " +
+               "este modo deja de ordenar nada y gana el primero de la lista: no lo uses sin S5 encendido.")
 i_cupoS1    = input.int(0, "Cupo diario propio · S1 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP)
 i_cupoS2    = input.int(0, "Cupo diario propio · S2 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP)
 i_cupoS3    = input.int(0, "Cupo diario propio · S3 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP)
@@ -606,22 +630,38 @@ bool forceViernes = modo24 and esViernes and nowMinNY >= 16 * 60 + 50
 //  el perfil horario cambia con el régimen de volatilidad.
 var array<float> horaSum = array.new_float(24, 0.0)
 var array<int>   horaN   = array.new_int(24, 0)
+//  DERIVA por hora (v2.8, para S5): suma de cierre − apertura de cada hora.
+//  El rango dice cuánto se mueve una hora; la deriva dice HACIA DÓNDE. Son dos
+//  cosas distintas y S5 necesita la segunda. Se mide en el gráfico por el mismo
+//  motivo que el rango: una tabla de sesgos por hora sería un nivel hardcodeado
+//  y además la hipótesis de S5 está sin comprobar, así que lo útil es poder
+//  comprobarla con los datos que se estén usando.
+var array<float> horaDrv = array.new_float(24, 0.0)
 var float hHi   = na
 var float hLo   = na
+var float hOpen = na
+var float hCls  = na
 var int   hSlot = na
 
 int slotAhora = hour(time, "America/New_York")
 if na(hSlot) or slotAhora != hSlot
-    // Al cambiar de hora se cierra la anterior y se archiva su rango.
+    // Al cambiar de hora se cierra la anterior y se archiva su rango. hCls
+    // todavía guarda el cierre de la última vela de la hora que acaba, porque
+    // en esta rama aún no se ha actualizado.
     if not na(hSlot) and not na(hHi) and not na(hLo)
         array.set(horaSum, hSlot, array.get(horaSum, hSlot) + (hHi - hLo))
         array.set(horaN,   hSlot, array.get(horaN,   hSlot) + 1)
+        if not na(hOpen) and not na(hCls)
+            array.set(horaDrv, hSlot, array.get(horaDrv, hSlot) + (hCls - hOpen))
     hSlot := slotAhora
     hHi   := high
     hLo   := low
+    hOpen := open
+    hCls  := close
 else
-    hHi := math.max(nz(hHi, high), high)
-    hLo := math.min(nz(hLo, low),  low)
+    hHi  := math.max(nz(hHi, high), high)
+    hLo  := math.min(nz(hLo, low),  low)
+    hCls := close
 
 // Media de la hora en curso y media de todas las horas con muestra suficiente.
 f_mediaHora(int slot) =>
@@ -2142,6 +2182,7 @@ type Cand
     int    dir
     float  stop      // precio del stop, ya en la rejilla de ticks
     float  tgt        // objetivo propio; na = usar el objetivo estándar en USD
+    int    score     // 50 neutro; S5 lo sube o lo baja. No dispara, describe.
     string motivo
 
 //  Lista del bar en curso. Es `var` y se vacía al empezar cada vela, para
@@ -2149,9 +2190,34 @@ type Cand
 var array<Cand> cands = array.new<Cand>()
 array.clear(cands)
 
+//  S5 · sesgo de la hora en curso. 1 alcista, -1 bajista, 0 sin opinión. En el
+//  modo medido no opina hasta tener muestra, que es lo que impide que las
+//  primeras semanas de histórico inventen un sesgo.
+f_s5Bias() =>
+    int b = 0
+    if i_s5Modo == "Hipótesis fija (Asia alcista)"
+        b := enAsia ? 1 : -1
+    else if not na(hSlot)
+        int n = array.get(horaN, hSlot)
+        if n >= i_s5MinN
+            float d = array.get(horaDrv, hSlot) / n
+            b := d > 0 ? 1 : d < 0 ? -1 : 0
+    b
+
+//  La puntuación del candidato arranca neutra en 50. S5 solo toca a S1 y S2,
+//  como pedía la especificación: no inclina ni el fade ni las noticias.
 f_addCand(string estr, int dir, float stop, float tgt, string motivo) =>
+    int sc = 50
+    if i_s5On and (estr == "S1" or estr == "S2")
+        int b = f_s5Bias()
+        if b != 0
+            sc += b == dir ? i_s5Peso : -i_s5Peso
     array.push(cands, Cand.new(estr = estr, dir = dir, stop = stop, tgt = tgt,
-         motivo = motivo))
+         score = math.max(0, math.min(100, sc)), motivo = motivo))
+
+//  Un candidato por debajo del mínimo de puntuación se descarta. Con el mínimo
+//  a 0 no descarta nada, que es el defecto.
+f_candVale(Cand c) => c.score >= i_s5MinScr
 
 //  Contadores diarios por fuente. Los usan el cupo propio y el reparto
 //  rotatorio, y el de conflictos va a la tabla de diagnóstico.
@@ -2576,7 +2642,7 @@ bool hayDn = legDir == -1
 if array.size(cands) > 0
     for i = 0 to array.size(cands) - 1
         Cand c = array.get(cands, i)
-        if f_cupoLibre(c.estr)
+        if f_cupoLibre(c.estr) and f_candVale(c)
             if c.dir == 1
                 hayUp := true
             else
@@ -2598,8 +2664,9 @@ if not (conflicto and i_conflicto == "No operar ninguna")
     if array.size(cands) > 0
         for i = 0 to array.size(cands) - 1
             Cand c = array.get(cands, i)
-            if f_cupoLibre(c.estr)
-                int pc = f_prioFuente(c.estr)
+            if f_cupoLibre(c.estr) and f_candVale(c)
+                int pc = i_prioridad == "Por puntuación del candidato" ?
+                     100 - c.score : f_prioFuente(c.estr)
                 if pc < mejorP
                     mejorP  := pc
                     setDir  := c.dir
@@ -3634,6 +3701,23 @@ if i_showTable and verExtras and barstate.islast
     r := f_filaDiag(r, "Régimen del día", regFila,
          regimen == 1 ? color.new(color.teal, 0) :
          regimen == -1 ? color.new(color.orange, 0) : color.new(color.gray, 20))
+
+    //  S5 · la deriva medida de la hora en curso, con su muestra. Es la fila
+    //  que permite CONTRASTAR la hipótesis en vez de creérsela: si el oro no
+    //  sube en Asia en estos datos, aquí se ve.
+    string s5Txt = ""
+    if not na(hSlot)
+        int nH = array.get(horaN, hSlot)
+        if nH >= i_s5MinN
+            float dH = array.get(horaDrv, hSlot) / nH
+            s5Txt := str.tostring(hSlot) + "h ET: " + str.tostring(dH, "+#.##") +
+                 " pts/hora · n=" + str.tostring(nH) +
+                 (i_s5On ? "" : " · S5 apagado")
+        else
+            s5Txt := str.tostring(hSlot) + "h ET: muestra " + str.tostring(nH) + "/" +
+                 str.tostring(i_s5MinN) + ", sin sesgo"
+    r := f_filaDiag(r, "Deriva de la hora", s5Txt,
+         color.new(color.gray, 10))
 
     r := f_filaDiag(r, "Perfil horario", hTxt,
          f_horaDebil() ? color.new(color.orange, 0) : chart.fg_color)
