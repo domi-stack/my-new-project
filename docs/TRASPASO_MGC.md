@@ -5,7 +5,7 @@ Documento de contexto para continuar el trabajo en otra conversación. Fecha: 12
 **Fichero**: `pine/MGC_FVG_ORB.pine` · Pine Script v6 · `strategy()` · MGC 5 minutos
 **Tamaño**: 2895 líneas, 85 inputs
 **Versión**: v2.7 (limpieza visual, y dos bugs de niveles corregidos)
-**Segundo fichero**: `pine/MGC_v5_indicador.pine` · 996 líneas · `indicator()` · 24 h, puerta de calidad única. **Falta su versión `strategy()`**, que estaba pedida en el mismo encargo.
+**Segundo fichero**: `pine/MGC_v5_indicador.pine` · v5.1 · 1.033 líneas, 30 inputs · `indicator()` · 24 h, puerta de calidad única. **Falta su versión `strategy()`**, que estaba pedida en el mismo encargo.
 **Repos**: `domi-stack/crisol` (main) y `domi-stack/my-new-project` (rama `claude/orb-day-trading-bot-es-3bo9db`, PR #1 abierto)
 
 Documentos de especificación que se han seguido, en orden de precedencia creciente:
@@ -159,6 +159,21 @@ Ocho commits (`a74be8a` a `5a6dbc5`). **El punto 1 era una verificación de nive
 
 1. **Leer el array que se está modificando.** La regla del solape y la supresión de rótulos recorren las zonas decidiendo cuáles se ven. Si leen el mismo array que acaban de escribir, el resultado depende del orden del recorrido. Las dos leen una copia, o el array de visibilidad ya cerrado, nunca `z.visible` a medio actualizar.
 2. **La caché de renderizado se queda corta al añadir una decisión de dibujo.** `rendTier`/`rendEst` evitaban restilar sin motivo, pero al entrar el relleno y el rótulo había dos decisiones más que la caché no veía. `rendFill` las codifica en un número.
+
+---
+
+### v5.1 · Indicador · antirrepintado y panel
+
+Siete commits (`810cb16` a `c7cb868`) sobre `pine/MGC_v5_indicador.pine`. Ningún peso, umbral, R:R mínimo ni regla de ARMADO o DISPARO cambia; comprobado con un diff restringido a esas expresiones.
+
+1. **VIGILAR solo al cierre.** `hayVigilar`/`vigDir` se recalculaban en cada tick, así que el círculo aparecía y desaparecía a mitad de vela según el precio entrara y saliera del medio ATR de la zona. Pasan a `var` y solo se tocan con `barstate.isconfirmed`.
+2. **Marcos superiores sin desfase.** Las cuatro llamadas a `request.security` que ya llevaban la expresión desplazada `[1]` pasan de `lookahead_off` a **`lookahead_on`**. Ese par es el idioma que no repinta; `lookahead_off` con expresión desplazada entrega el dato cuando el marco superior cierra en tiempo real, pero una vela superior más tarde en el histórico, así que las dos series no son la misma. Las llamadas: `[pdh, pdl]`, las tres `f_fvgHtf` (15, 60, 1D) y `f_estructura` con `shift = true`, **más `atr5`**, que no estaba en la lista del encargo pero cumple su criterio: `tfSetup` es `"5"` y en un gráfico de 1m es marco superior, de modo que dejarlo habría conservado el desfase justo en el ATR, que alimenta la anchura mínima del FVG y el score. Revisado que no queda ninguna expresión sin desplazar dentro de un `lookahead_on`; la única es `time` en `f_fvgHtf`, que es la excepción admitida y la que dispara `nuevo15`/`nuevo60`/`nuevoDd`.
+3. **Apertura diaria del propio gráfico**, con `timeframe.change("1D")`. Se pedía al diario con `open` **sin desplazar**, que es la única combinación que de verdad miraría al futuro con `lookahead_on`. Ya no queda ninguna llamada en `lookahead_off`.
+4. **Fuera el aviso de gráfico spot sin base.** Queda solo el de temporalidad, que sí cambia lo que el indicador puede detectar. El input `Base futuros − spot` se mantiene y sigue convirtiendo los precios del panel.
+5. **Fuera las filas «Calib. total» y «NY / Asia»** y el input que las mostraba. Una fila que dice «n=14 · 57% · +0,12R» invita a creerse una ventaja que con esa muestra no está medida. Las arrays de calibración siguen, porque las usa *Desactivar setups con esperanza negativa*: lo que se quita es publicar la cifra, no medirla.
+6. **El panel oculta Score, E/SL/TP1, R:R, Contratos y Antigüedad cuando no hay setup vivo**, con el mismo contador de filas que la v2.7 §5.
+
+**Checklist, prueba 9 nueva:** comparar un día completo en Bar Replay y exigir que rombos y flechas caigan en la misma vela que en el histórico. Es la prueba del punto 2, y es más estrecha que la prueba 1: esa mira si algo repinta, esta mira si histórico y vivo son la misma serie.
 
 ---
 
