@@ -196,6 +196,34 @@ Tres de ellos habrían impedido compilar o habrían dejado la estrategia sin ope
 10. **El modo 24 h no operaba las primeras seis horas del día CME** (C1), por una bandera de cierre forzoso abierta por arriba.
 11. **Patrón de marcos superiores propenso a repintado** (C2): `lookahead_off` hace que histórico y tiempo real no coincidan, y una de las llamadas no llevaba ningún desplazamiento.
 12. **Pools de dibujo borrados por el recolector de Pine** (C3) al no tener cola las etiquetas de señal.
+13. **El máximo y el mínimo del día se dibujaban desde la ventana, no desde el día** (v2.7 §1a). Solo afectaba al dibujo: en `Ventana NY` lo rotulado como «máximo de sesión» era el extremo de 09:30-13:00 ET, así que un máximo hecho de madrugada no aparecía. Corregido con una clave de día propia anclada a las 18:00 ET. Sin impacto en operaciones: `sessHigh`/`sessLow` siguen intactos y son los que alimentan los barridos y la holgura.
+14. **PDH y PDL pertenecían a un periodo distinto del que el script llama «día»** (v2.7 §1b). **Este sí tiene impacto en operaciones**, y está detallado en el apartado siguiente.
+
+---
+
+## 5b. El bug de PDH/PDL · impacto en operaciones
+
+Se pedían al diario del exchange:
+
+```pine
+[pdh, pdl] = request.security(syminfo.tickerid, "1D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+```
+
+El idioma no repinta —eso estaba bien— pero **el corte de la vela diaria no es el día de trading del script**. El script define el día desde las **18:00 ET**; el diario del exchange rueda a las 17:00 ET en oro spot de OANDA y a la medianoche de su propia zona en cualquier símbolo sin sesión de futuros. El nivel que salía era el extremo de *otro* periodo, y la fecha a la que correspondía no era la del día de trading anterior.
+
+**Tres reglas lo leen**, así que la corrección mueve la lista de operaciones:
+
+| Dónde | Qué decide |
+|---|---|
+| `swpPdl` / `swpPdh` | barridos de liquidez del día anterior, que son un disparador de entrada |
+| Confluencia de nivel del score | puntos de score, y el score alimenta el veto de fuerza mínima y el filtro ALTA |
+| Filtro de holgura, con `usePrevDay` | veta la entrada si no hay recorrido hasta el obstáculo |
+
+Ahora PDH/PDL se acumulan del propio gráfico con la misma clave de día que HOD/LOD y quedan fijos en el cambio de día, así que no repintan.
+
+**Coste asumido:** en el primer día de trading del histórico no hay día anterior, de modo que PDH/PDL valen `na` y los barridos de día anterior no pueden dispararse ese día. Antes el diario los daba desde la primera vela. Es un día menos de muestra a cambio de que el nivel sea el que el script dice que es.
+
+**Consecuencia para la regresión:** la línea base v2.2 queda invalidada por este cambio. Hace falta **una línea base nueva, v2.7**, y la diferencia contra la v2.2 se explica por estas tres reglas y por nada más. Protocolo en `backtests/README.md`.
 
 ---
 

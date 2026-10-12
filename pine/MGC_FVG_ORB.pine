@@ -604,9 +604,6 @@ else if inSession
     sessHigh := math.max(nz(sessHigh, high), high)
     sessLow  := math.min(nz(sessLow,  low),  low)
 
-// Máximo y mínimo del día anterior: se pide la vela diaria ya cerrada.
-[pdh, pdl] = request.security(syminfo.tickerid, "1D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
-
 // --- ADR(20) y rango consumido hoy (§4.3) -----------------------------------
 //  El ADR se toma de velas diarias YA CERRADAS ([1]); el rango de hoy es el de
 //  la vela diaria en formación, que es precisamente lo que se quiere medir.
@@ -652,6 +649,42 @@ if nuevoCme
 else
     hod := math.max(nz(hod, high), high)
     lod := math.min(nz(lod, low),  low)
+
+// --- PDH y PDL · extremos del DÍA DE TRADING ANTERIOR (v2.7 §1b) ------------
+//  BUG CORREGIDO, Y ESTE SÍ CAMBIA OPERACIONES. Antes:
+//      [pdh, pdl] = request.security(tickerid, "1D", [high[1], low[1]], lookahead_on)
+//  Eso devuelve la vela diaria anterior del EXCHANGE, y el corte del diario no
+//  es el día de trading del script. En oro spot (OANDA:XAUUSD) el diario rueda
+//  a las 17:00 ET, y en cualquier símbolo sin sesión de futuros a la medianoche
+//  de su propia zona, no a las 18:00 ET. El PDH/PDL que salía era por tanto el
+//  de un periodo distinto del que el resto del script llama "día", y su fecha
+//  no era la del día de trading anterior.
+//
+//  Ahora se acumulan del propio gráfico con la MISMA clave de día que HOD/LOD,
+//  y se guarda la clave del día anterior para poder rotularla. Al tomarse en el
+//  cambio de día, quedan fijos: no repintan.
+//
+//  COSTE: en el primer día de trading del histórico no hay día anterior, así
+//  que PDH/PDL valen na y los barridos de día anterior no pueden dispararse
+//  ese día. Antes el diario los daba desde la primera vela. Es un día menos de
+//  muestra, a cambio de que el nivel sea el que el script dice que es.
+var float pdh     = na
+var float pdl     = na
+var int   prevKey = na
+if nuevoCme
+    pdh     := hod[1]
+    pdl     := lod[1]
+    prevKey := lastCmeKey[1]
+
+// Fecha del día de trading al que pertenecen PDH y PDL, para el rótulo. Se
+// construye de la clave (yyyymmdd) en vez de formatear una marca de tiempo:
+// la clave YA está desplazada a las 18:00 ET, así que una sesión que empieza
+// un domingo por la tarde se rotula con el lunes, que es el día que es.
+f_fechaClave(int k) =>
+    int  dd = na(k) ? 0 : k % 100
+    int  mm = na(k) ? 0 : (k / 100) % 100
+    na(k) ? "" : (dd < 10 ? "0" : "") + str.tostring(dd) + "-" +
+         (mm < 10 ? "0" : "") + str.tostring(mm)
 
 // --- Contexto DXY, solo lectura (§4.5) --------------------------------------
 //  No entra en ninguna decisión. Está para que la medición diga si merece la
@@ -2254,8 +2287,14 @@ if barstate.islast
              color = color.new(color.gray, 100), textcolor = chart.fg_color, size = size.small)
 
     if verEtiq
-        f_moverEtiq(lbPdh,  pdh,      "PDH "  + str.tostring(pdh,      format.mintick), color.new(color.blue,   0))
-        f_moverEtiq(lbPdl,  pdl,      "PDL "  + str.tostring(pdl,      format.mintick), color.new(color.blue,   0))
+        // La fecha es la del día de trading al que pertenece el nivel, no la
+        // del día natural de la vela que lo hizo: así se puede comprobar de un
+        // vistazo que el lunes muestra el viernes.
+        string fPrev = f_fechaClave(prevKey)
+        f_moverEtiq(lbPdh,  pdh, "PDH " + str.tostring(pdh, format.mintick) +
+             (fPrev == "" ? "" : " · " + fPrev), color.new(color.blue, 0))
+        f_moverEtiq(lbPdl,  pdl, "PDL " + str.tostring(pdl, format.mintick) +
+             (fPrev == "" ? "" : " · " + fPrev), color.new(color.blue, 0))
         f_moverEtiq(lbHod,  hod,      "HOD "  + str.tostring(hod,      format.mintick), color.new(color.purple, 0))
         f_moverEtiq(lbLod,  lod,      "LOD "  + str.tostring(lod,      format.mintick), color.new(color.purple, 0))
         f_moverEtiq(lbSsO,  sessOpen, "Open " + str.tostring(sessOpen, format.mintick), color.new(color.gray,  20))
