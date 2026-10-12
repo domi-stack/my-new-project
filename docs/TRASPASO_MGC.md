@@ -1,10 +1,10 @@
 # MGC · Estado del bot para traspaso
 
-Documento de contexto para continuar el trabajo en otra conversación. Fecha: 10 de octubre de 2026.
+Documento de contexto para continuar el trabajo en otra conversación. Fecha: 12 de octubre de 2026.
 
 **Fichero**: `pine/MGC_FVG_ORB.pine` · Pine Script v6 · `strategy()` · MGC 5 minutos
-**Tamaño**: 2.530 líneas, 85 inputs
-**Versión**: v2.6 (varias operaciones diarias, a cualquier hora, por decisión del usuario)
+**Tamaño**: 2895 líneas, 85 inputs
+**Versión**: v2.7 (limpieza visual, y dos bugs de niveles corregidos)
 **Segundo fichero**: `pine/MGC_v5_indicador.pine` · 996 líneas · `indicator()` · 24 h, puerta de calidad única. **Falta su versión `strategy()`**, que estaba pedida en el mismo encargo.
 **Repos**: `domi-stack/crisol` (main) y `domi-stack/my-new-project` (rama `claude/orb-day-trading-bot-es-3bo9db`, PR #1 abierto)
 
@@ -137,7 +137,28 @@ Once commits (`17ba3d8` a `f1d04a8`). **Son decisiones del usuario, no recomenda
 
 Los otros tres controles de la lista salen limpios: paréntesis balanceados, todo declarado antes de usarse y ninguna función asignando a una variable global.
 
-**Regresión.** Con `Modo horario = Ventana NY`, máximo diario en 1, los cuatro frenos a 0 y los disparadores nuevos apagados, la lista de operaciones debe coincidir con `backtests/baseline-v2.2.csv`. Esa comparación **no se ha podido hacer**: el CSV de la línea base sigue sin generarse porque requiere TradingView (ver §1).
+**Regresión.** Con `Modo horario = Ventana NY`, máximo diario en 1, los cuatro frenos a 0 y los disparadores nuevos apagados, la lista de operaciones debía coincidir con la línea base. Esa comparación **no se ha podido hacer**: el CSV sigue sin generarse porque requiere TradingView (ver §1). La v2.7 invalida además esa línea base; ver abajo.
+
+---
+
+### v2.7 · Limpieza visual, y dos bugs de niveles
+
+Ocho commits (`a74be8a` a `5a6dbc5`). **El punto 1 era una verificación de niveles y encontró dos bugs**; el resto es dibujo y no puede mover una operación.
+
+| Punto | Cambio | ¿Mueve operaciones? |
+|---|---|---|
+| 1a | HOD/LOD se miden desde las 18:00 ET en los tres modos horarios, con clave de día propia. Lo rotulado como «máximo de sesión» era el extremo de la **ventana** | **No.** `sessHigh`/`sessLow` siguen intactos y son los que alimentan barridos y holgura |
+| 1b | PDH/PDL pasan a ser los extremos del **día de trading anterior**, acumulados del gráfico, con la fecha en el rótulo | **Sí.** Ver §5b |
+| 2 | Relleno solo en la zona activa más cercana por lado; el resto, contorno de 1 px. Si dos zonas se solapan manda la de marco mayor. Tope `X_DER` de 5 velas a la derecha | No |
+| 3 | Rótulos de 40 caracteres como tope duro, formato `4H FVG ▼ 4171–4191`, y supresión por prioridad a menos de 0,5 ATR | No |
+| 4 | Máximo cuatro líneas de nivel a la vez, dentro de 6 ATR, con los números redondos en el mismo presupuesto | No |
+| 5 | Filas de tabla sin dato ocultas, y por debajo de 30 operaciones «muestra insuficiente (n=X)» sin cifras | No |
+| 6 | El aviso de gráfico spot desaparece del todo. El input `Base futuros − spot` se mantiene | No |
+
+**Dos trampas que aparecieron dos veces y conviene no reintroducir:**
+
+1. **Leer el array que se está modificando.** La regla del solape y la supresión de rótulos recorren las zonas decidiendo cuáles se ven. Si leen el mismo array que acaban de escribir, el resultado depende del orden del recorrido. Las dos leen una copia, o el array de visibilidad ya cerrado, nunca `z.visible` a medio actualizar.
+2. **La caché de renderizado se queda corta al añadir una decisión de dibujo.** `rendTier`/`rendEst` evitaban restilar sin motivo, pero al entrar el relleno y el rótulo había dos decisiones más que la caché no veía. `rendFill` las codifica en un número.
 
 ---
 

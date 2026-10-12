@@ -1,4 +1,10 @@
-# Línea base de regresión · v2.2
+# Línea base de regresión · v2.7
+
+> **La v2.2 queda invalidada.** La v2.7 §1b corrige un bug en PDH/PDL que **mueve la lista de operaciones**: se pedían a la vela diaria del exchange, cuyo corte no es el día de trading del script. Lo leen los barridos del día anterior, la confluencia de nivel del score y el filtro de holgura. El detalle está en `docs/TRASPASO_MGC.md` §5b.
+>
+> Lo que hay que generar es por tanto **`backtests/baseline-v2.7.csv`**. Si llega a existir un `baseline-v2.2.csv`, sirve solo para medir la diferencia, y esa diferencia tiene que explicarse por esas tres reglas y por nada más.
+>
+> Todo lo demás de la v2.7 es dibujo y no puede mover ni una operación: HOD/LOD, relleno de zonas, rótulos, tope de cuatro niveles, filas de tabla y la retirada del aviso de spot.
 
 ## Por qué se rehace
 
@@ -35,7 +41,7 @@ Todo lo demás, en su valor por defecto.
    Anotar abajo cuál se usó. Mezclar las dos entre pasadas invalida la comparación.
 
 4. En el Strategy Tester, pestaña **List of Trades**, exportar a CSV.
-5. Guardar como `backtests/baseline-v2.2.csv` y subirlo al repo.
+5. Guardar como `backtests/baseline-v2.7.csv` y subirlo al repo.
 6. Anotar abajo la fecha, el rango de datos y el número de operaciones.
 
 ## Cómo se usa
@@ -55,7 +61,7 @@ Temporalidad        : 5m
 Rango de datos      :
 Nº de operaciones   :
 Commit              : (git rev-parse --short HEAD)
-Etiqueta            : baseline-v2.2
+Etiqueta            : baseline-v2.7
 Tratamiento del roll: [ ] ajuste por cambio de contrato activado
                       [ ] sin ajuste, sesiones de roll excluidas (listar fechas)
 ```

@@ -162,10 +162,13 @@ Cada nivel de swing solo puede romperse una vez: se recuerda el último roto par
 
 ## 5. Niveles de sesión y VWAP
 
-- Máximo y mínimo de la sesión, actualizados en vivo
-- Máximo y mínimo del día anterior (vela diaria ya cerrada)
+- **HOD / LOD**: máximo y mínimo del **día de trading**, que empieza a las 18:00 ET. Desde la v2.7 se miden así en los tres modos horarios. Antes se dibujaba el extremo de la *ventana*, que en `Ventana NY` solo mira 09:30-13:00 y por tanto no veía un máximo hecho de madrugada.
+- **PDH / PDL**: máximo y mínimo del **día de trading anterior**, acumulados del propio gráfico con esa misma clave de día, y con la fecha de ese día en el rótulo. Hasta la v2.7 se pedían a la vela diaria del exchange, cuyo corte no coincide con el día del script: ver `docs/TRASPASO_MGC.md` §5b, porque **ese cambio mueve la lista de operaciones**.
+- Máximo y mínimo de la sesión o ventana, actualizados en vivo. No se dibujan, pero son los que alimentan los barridos del extremo de sesión y el filtro de holgura.
 - Apertura de la sesión
 - VWAP de sesión con bandas de desviación
+
+**Cuántos se ven a la vez (v2.7):** como mucho **cuatro líneas de nivel**, las más cercanas al precio dentro de 6 ATR, y los números redondos cuentan en ese mismo presupuesto. Si dos rótulos quedan a menos de 0,5 ATR se muestra solo el de mayor prioridad, en el orden `4H > 1H > PDH/PDL > HOD/LOD > VWAP > apertura`.
 
 **Las reglas asociadas**, porque ningún indicador se dibuja sin una:
 
