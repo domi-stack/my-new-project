@@ -371,6 +371,10 @@ i_verRangos   = input.bool(true, "Dibujar rangos Asia / Londres", group = G_VIS)
 i_verEtiqLvl  = input.bool(true, "Etiquetar niveles al borde derecho", group = G_VIS)
 i_showVwap  = input.bool(true, "Dibujar VWAP y bandas",         group = G_VIS)
 i_showTable = input.bool(true, "Mostrar tabla de diagnóstico",  group = G_VIS)
+i_marcas3   = input.bool(true, "Marcadores de tres niveles (punto · rombo · flecha)", group = G_VIS,
+     tooltip = "Portado del indicador v5. Sale de la misma capa de acción que la etiqueta y la tabla, así que las tres dicen siempre " +
+               "lo mismo. Punto gris para VIGILAR, rombo ámbar para PREPARAR o ESPERAR CONFIRMACIÓN, flecha para EJECUTAR.\n\n" +
+               "Es dibujo: no puede mover la lista de operaciones, y por eso viene encendido.")
 i_showSig   = input.bool(true, "Etiquetas COMPRA / VENTA",      group = G_VIS,
      tooltip = "Marca en el gráfico la vela que dispara la señal: COMPRA en verde bajo la vela, VENTA en rojo encima. " +
                "Al pasar el ratón por encima se ven entrada, stop, objetivo, contratos y motivo.")
@@ -3128,6 +3132,9 @@ if array.size(zones) > 0
 
 string accTxt = "NO OPERAR"
 string accSub = ""
+//  Dirección del estado de acción, para los marcadores de §9d. Se rellena en
+//  las mismas ramas que accTxt, así que no puede desincronizarse del texto.
+int    accDir = 0
 color  accCol = color.new(color.gray, 25)
 
 bool hayCand = candI >= 0 and candI < array.size(zones)
@@ -3152,6 +3159,7 @@ if strategy.position_size != 0
     accCol := color.new(color.blue, 15)
 else if setDir != 0
     accTxt := "EJECUTAR " + (setDir == 1 ? "COMPRA" : "VENTA")
+    accDir := setDir
     accSub := "disparo en esta vela"
     accCol := setDir == 1 ? color.new(color.green, 0) : color.new(color.red, 0)
 else if not hayCand
@@ -3167,6 +3175,7 @@ else
     Zona zc = array.get(zones, candI)
     [pEnt, pStop, pTgt, pQty, pRisk] = f_planZona(zc)
     string dirTxt = zc.dir == 1 ? "COMPRA" : "VENTA"
+    accDir := zc.dir
     string zTx = zc.tf + " " + (zc.dir == 1 ? "▲" : "▼") + " " + str.tostring(zc.score) + " " + f_tierTxt(zc.tier)
 
     if candATR <= 2 and candMask == 0
@@ -3356,6 +3365,39 @@ plotshape(verExtras and bosUp,     "BOS alcista",        shape.circle,       loc
 plotshape(verExtras and bosDn,     "BOS bajista",        shape.circle,       location.abovebar, color.new(color.maroon, 40), size = size.tiny)
 plotshape((verExtras or i_marcasLimpio) and sweepBull, "Barrido de mínimos", shape.xcross,       location.belowbar, color.new(color.aqua,    0), size = size.tiny)
 plotshape((verExtras or i_marcasLimpio) and sweepBear, "Barrido de máximos", shape.xcross,       location.abovebar, color.new(color.fuchsia, 0), size = size.tiny)
+
+// =============================================================================
+//  9d · MARCADORES DE TRES NIVELES (portado del indicador v5)
+// =============================================================================
+//  El lenguaje visual del v5: un punto para mirar, un rombo para prepararse y
+//  una flecha para actuar. Sale de la MISMA capa de acción de §8b que alimenta
+//  la etiqueta y la tabla, así que las tres cosas no pueden contradecirse.
+//
+//  Es dibujo y nada más: no puede mover la lista de operaciones. Por eso viene
+//  encendido, al contrario que los inputs de trading.
+//
+//  Escala de atención, de menos a más:
+//    ·  punto gris    VIGILAR    hay zona en el radio, no hagas nada
+//    ◆  rombo ámbar   PREPARAR o ESPERAR CONFIRMACIÓN: el plan ya existe
+//    ▲  flecha        EJECUTAR: esta vela dispara
+bool verMarcas = i_marcas3 and (verExtras or i_marcasLimpio)
+bool mkVig = verMarcas and str.startswith(accTxt, "VIGILAR")
+bool mkPrep = verMarcas and (str.startswith(accTxt, "PREPARAR") or
+     str.startswith(accTxt, "ESPERAR"))
+bool mkEjec = verMarcas and str.startswith(accTxt, "EJECUTAR")
+
+plotshape(mkVig and accDir ==  1, "Vigilar compra", shape.circle, location.belowbar,
+     color.new(color.green, 55), size = size.tiny)
+plotshape(mkVig and accDir == -1, "Vigilar venta",  shape.circle, location.abovebar,
+     color.new(color.red,   55), size = size.tiny)
+plotshape(mkPrep and accDir ==  1, "Preparar compra", shape.diamond, location.belowbar,
+     color.new(color.orange, 0), size = size.tiny)
+plotshape(mkPrep and accDir == -1, "Preparar venta",  shape.diamond, location.abovebar,
+     color.new(color.orange, 0), size = size.tiny)
+plotshape(mkEjec and accDir ==  1, "Ejecutar compra", shape.triangleup, location.belowbar,
+     color.new(color.green, 0), size = size.normal)
+plotshape(mkEjec and accDir == -1, "Ejecutar venta",  shape.triangledown, location.abovebar,
+     color.new(color.red,   0), size = size.normal)
 
 // Fondo de la ventana Silver Bullet, en un tono distinto y más tenue que el de
 // la ventana de operativa. Dos fondos superpuestos es el límite de lo legible.
