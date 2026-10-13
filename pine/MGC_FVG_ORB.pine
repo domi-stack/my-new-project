@@ -574,6 +574,13 @@ i_cupoS3    = input.int(0, "Cupo diario propio · S3 (0 = sin cupo propio)", min
 i_cupoS4    = input.int(0, "Cupo diario propio · S4 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP,
      tooltip = "Un cupo propio ACOTA esa estrategia, no le reserva sitio: el límite diario global sigue mandando por encima. Con 0 la " +
                "estrategia no tiene tope propio y compite solo por el cupo global.")
+i_autoOff   = input.bool(false, "Apagar la fuente con esperanza negativa", group = G_CUP,
+     tooltip = "APAGADO. Portado del indicador v5. Con al menos 30 operaciones cerradas de una fuente y esperanza media por debajo de " +
+               "cero, deja de operarla durante el resto del backtest.\n\n" +
+               "LEE ESTO ANTES DE ENCENDERLO: es una decisión tomada DENTRO del backtest con los datos del propio backtest, así que " +
+               "mejora el resultado por construcción y ese resultado NO es extrapolable. Sirve para una cosa concreta —ver cuánto del " +
+               "total venía de las fuentes malas— y para nada más. No lo dejes encendido en una medición que vayas a creerte.")
+i_autoOffN  = input.int(30, "Operaciones mínimas antes de poder apagar una fuente", minval = 10, maxval = 200, group = G_CUP)
 i_conflicto = input.string("No operar ninguna", "Dos estrategias en sentidos opuestos la misma vela",
      options = ["No operar ninguna", "Manda la de mayor prioridad"], group = G_CUP,
      tooltip = "Por defecto no se opera. Dos sistemas que se contradicen no es una señal débil: es ausencia de señal, y el contador de " +
@@ -2317,6 +2324,26 @@ f_candVale(Cand c) => c.score >= i_s5MinScr
 
 //  Contadores diarios por fuente. Los usan el cupo propio y el reparto
 //  rotatorio, y el de conflictos va a la tabla de diagnóstico.
+//  Resultado acumulado por familia, para la desactivación automática. Son
+//  acumuladores incrementales y no un recuento de la tabla: la tabla solo se
+//  calcula en la última vela, y esto hay que consultarlo en cada señal.
+//  Índices: 0 FVG · 1 S1 · 2 S2 · 3 S3 · 4 S4.
+var array<int>   famN = array.new_int(5, 0)
+var array<float> famR = array.new_float(5, 0.0)
+
+f_famIdx(string estr) =>
+    estr == "S1" ? 1 : estr == "S2" ? 2 : estr == "S3" ? 3 : estr == "S4" ? 4 : 0
+
+//  ¿Sigue viva esta fuente? Con i_autoOff apagado, siempre.
+f_famViva(string estr) =>
+    bool viva = true
+    if i_autoOff
+        int fi = f_famIdx(estr)
+        int n  = array.get(famN, fi)
+        if n >= i_autoOffN and array.get(famR, fi) / n < 0
+            viva := false
+    viva
+
 var int opsFvgDia   = 0
 var int opsS1       = 0
 var int opsS2       = 0
@@ -2738,12 +2765,16 @@ string setMot  = ""
 //  Conflicto 4 · direcciones presentes entre las fuentes ELEGIBLES, contando
 //  también el candidato heredado: si el FVG compra y S3 vende, el desacuerdo es
 //  el mismo que entre dos estrategias nuevas.
-bool hayUp = legDir == 1
-bool hayDn = legDir == -1
+//  La desactivación automática se aplica también al candidato heredado: si la
+//  fuente FVG tiene esperanza negativa con muestra, apagarla a ella y no a las
+//  nuevas sería elegir el resultado en vez de medirlo.
+bool legVivo = legDir != 0 and f_famViva("FVG")
+bool hayUp = legVivo and legDir == 1
+bool hayDn = legVivo and legDir == -1
 if array.size(cands) > 0
     for i = 0 to array.size(cands) - 1
         Cand c = array.get(cands, i)
-        if f_cupoLibre(c.estr) and f_candVale(c)
+        if f_cupoLibre(c.estr) and f_candVale(c) and f_famViva(c.estr)
             if c.dir == 1
                 hayUp := true
             else
@@ -2757,7 +2788,7 @@ if conflicto
 //  señal. Por defecto no se opera ninguna de las dos.
 if not (conflicto and i_conflicto == "No operar ninguna")
     int mejorP = 999
-    if legDir != 0
+    if legVivo
         mejorP  := f_prioFuente("FVG")
         setDir  := legDir
         setKind := legKind
@@ -2765,7 +2796,7 @@ if not (conflicto and i_conflicto == "No operar ninguna")
     if array.size(cands) > 0
         for i = 0 to array.size(cands) - 1
             Cand c = array.get(cands, i)
-            if f_cupoLibre(c.estr) and f_candVale(c)
+            if f_cupoLibre(c.estr) and f_candVale(c) and f_famViva(c.estr)
                 int pc = i_prioridad == "Por puntuación del candidato" ?
                      100 - c.score : f_prioFuente(c.estr)
                 if pc < mejorP
@@ -3108,6 +3139,16 @@ if strategy.closedtrades > nz(strategy.closedtrades[1], 0)
         // Contadores del freno y del enfriamiento.
         if strategy.closedtrades.profit(ci) < 0
             perdHoy += 1
+        // --- Acumulado por familia, para la desactivación automática --------
+        //  Se actualiza SIEMPRE, con i_autoOff encendido o apagado: si solo se
+        //  acumulara al encenderlo, el contador empezaría de cero a mitad del
+        //  backtest y las 30 operaciones mínimas no serían las 30 primeras.
+        if riesgoPlan > 0
+            int fi = f_famIdx(oc.estrategia)
+            array.set(famN, fi, array.get(famN, fi) + 1)
+            array.set(famR, fi, array.get(famR, fi) +
+                 strategy.closedtrades.profit(ci) / riesgoPlan)
+
         // --- Resultado escrito en la etiqueta de la señal (v2.9) ------------
         //  Portado del indicador v5, y aquí es MEJOR que allí: en el indicador
         //  el resultado era simulado contra TP1 y SL; aquí es el PnL real de la
@@ -3564,7 +3605,7 @@ if barstate.islast
 f_biasTxt(int b) => b ==  1 ? "alcista" : b == -1 ? "bajista" : "rango"
 f_biasCol(int b) => b ==  1 ? color.new(color.teal, 0) : b == -1 ? color.new(color.maroon, 0) : color.new(color.gray, 0)
 
-const int N_DIAG = 24
+const int N_DIAG = 26
 var table diag = table.new(position.top_right, 2, N_DIAG, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50))
 
 // Escribe una fila y devuelve la siguiente libre. Si no hay dato, no escribe y
@@ -3896,6 +3937,19 @@ if i_showTable and verExtras and barstate.islast
         chopFila := (esChop ? "SÍ" : "no") + " · ATR " + str.tostring(nz(atr, 0), "#.##") +
              " vs p" + str.tostring(i_chopPct) + " " + str.tostring(atrPctl, "#.##") +
              (chopApre ? " · rango apretado" : "") + (i_chopOn ? "" : " · filtro apagado")
+    //  Fuentes apagadas por esperanza negativa. Solo sale si hay alguna, que
+    //  es cuando importa.
+    string offTxt = ""
+    if i_autoOff
+        array<string> famNom = array.from("FVG", "S1", "S2", "S3", "S4")
+        for fi = 0 to 4
+            int nf = array.get(famN, fi)
+            if nf >= i_autoOffN and array.get(famR, fi) / nf < 0
+                offTxt += (offTxt == "" ? "" : " · ") + array.get(famNom, fi) +
+                     " (" + str.tostring(array.get(famR, fi) / nf, "+#.##") + "R, n=" +
+                     str.tostring(nf) + ")"
+    r := f_filaDiag(r, "Apagadas por E[R]<0", offTxt, color.new(color.orange, 0))
+
     r := f_filaDiag(r, "Chop", chopFila,
          esChop ? color.new(color.orange, 0) : color.new(color.gray, 10))
 
