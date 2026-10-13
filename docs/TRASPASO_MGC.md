@@ -12,6 +12,9 @@ Documentos de especificación que se han seguido, en orden de precedencia crecie
 1. `INSTRUCCIONES_V2_SENALES_Y_LECTURA.md` — fases 1 a 5
 2. `INSTRUCCIONES_V2_1_ALTA_PROBABILIDAD.md` — manda sobre el anterior donde choquen
 3. `CORRECCIONES_V2_2.md` — cinco correcciones y el protocolo de desbloqueo de la calibración
+4. `docs/ENCARGO_S1_S5.md` — el encargo de las cinco estrategias nuevas, archivado verbatim con su tabla de trazabilidad punto por punto
+
+Las correcciones v2.3 a v2.7 y la v5.1/v5.2 del indicador se pidieron por chat y no tienen fichero; lo que hicieron está en los apartados de §2.
 
 Ficheros añadidos en v2.2:
 - `backtests/README.md` — protocolo de la línea base de regresión
