@@ -588,6 +588,17 @@ i_s6SlMax   = input.float(2.5, "SL máximo (x ATR)", minval = 0.5, maxval = 10.0
 i_s6Spread  = input.float(0.3, "Colchón de spread (USD/oz)", minval = 0.0, maxval = 5.0, step = 0.05, group = G_S6,
      tooltip = "Se suma al SL en unidades de precio, no en ticks, para que valga igual en MGC que en XAUUSD. Un SL dentro del spread " +
                "no es un SL.")
+i_s6Conf    = input.string("Engulfing o ruptura del barrido", "Qué cuenta como confirmación",
+     options = ["Engulfing o ruptura del barrido", "+ ruptura de la vela del ARMADO"], group = G_S6,
+     tooltip = "DEFECTO = el comportamiento actual del v5. La segunda opción añade una tercera vía de confirmación y es candidata de la " +
+               "fase 2, pero solo si el contador exclusivo de 'sin confirmación' lo justifica.")
+i_s6ChochV  = input.int(0, "Velas de memoria del CHoCH para ir contra el sesgo", minval = 0, maxval = 30, group = G_S6,
+     tooltip = "Con 0 se exige el CHoCH en la VELA EXACTA del ARMADO, que es el comportamiento actual. Subirlo acepta un CHoCH de las " +
+               "últimas N velas. Candidato de la fase 2.")
+i_s6Tp1Resp = input.bool(false, "TP1 de respaldo si no hay nivel opuesto", group = G_S6,
+     tooltip = "APAGADO = comportamiento actual: sin nivel opuesto no hay TP1, no hay R:R y no hay disparo. Al encenderlo, TP1 pasa a " +
+               "entrada ± X R y la etiqueta lo declara como 'TP1 fijo', para no confundir un objetivo medido con uno inventado.")
+i_s6Tp1R    = input.float(2.0, "R del TP1 de respaldo", minval = 0.5, maxval = 10.0, step = 0.1, group = G_S6)
 i_s6Diag    = input.bool(true, "Modo diagnóstico de S6", group = G_S6,
      tooltip = "Cuenta, por cada ARMADO que caduca o se invalida, QUÉ filtros impidieron el disparo. Dos cifras por filtro: cuántas " +
                "veces bloqueó (falle o no otro) y cuántas veces fue el ÚNICO que bloqueaba.\n\n" +
@@ -1094,6 +1105,12 @@ float topeSwBull  = ta.valuewhen(sweepBull, high, 0)
 float topeSwBear  = ta.valuewhen(sweepBear, low,  0)
 float volSma20    = ta.sma(volume, 20)
 
+//  Velas desde el último CHoCH de cada lado. En ÁMBITO GLOBAL, igual que las
+//  demás: ta.barssince lleva estado y dentro del bucle por dirección de S6 se
+//  evaluaría de forma intermitente. Es el mismo CW10002 que f_liqPrevia tenía.
+int barsChochUp = nz(ta.barssince(chochUp), 999999)
+int barsChochDn = nz(ta.barssince(chochDn), 999999)
+
 
 bool sweepBullRecent = barsSwBull <= i_sweepLook
 bool sweepBearRecent = barsSwBear <= i_sweepLook
@@ -1405,6 +1422,31 @@ f_zonaTxt(Zona z) =>
 f_cercaNivel(float y, float a) =>
     float tol = na(atr) ? 0.0 : 0.5 * atr
     tol > 0 and not na(y) and not na(a) and math.abs(y - a) <= tol
+
+// §1.4 · FUSIÓN de rótulos. La regla de §3 de la v2.7 silencia el nivel de
+// menor prioridad a menos de 0,5 ATR. Silenciarlo del todo pierde información:
+// si el PDL y el mínimo de Asia están pegados, saber que coinciden vale más que
+// ver solo uno. Esto devuelve los nombres de los que se callaron a menos de
+// 0,3 ATR, para añadirlos al rótulo del que sí se muestra.
+f_fusion(float y) =>
+    float tol = na(atr) ? 0.0 : 0.3 * atr
+    string s = ""
+    if tol > 0 and not na(y)
+        if not na(pdh) and pdh != y and math.abs(y - pdh) <= tol
+            s += " · PDH"
+        if not na(pdl) and pdl != y and math.abs(y - pdl) <= tol
+            s += " · PDL"
+        if not na(hod) and hod != y and math.abs(y - hod) <= tol
+            s += " · HOD"
+        if not na(lod) and lod != y and math.abs(y - lod) <= tol
+            s += " · LOD"
+        if not na(asiaHiFijo) and asiaHiFijo != y and math.abs(y - asiaHiFijo) <= tol
+            s += " · AsiaH"
+        if not na(asiaLoFijo) and asiaLoFijo != y and math.abs(y - asiaLoFijo) <= tol
+            s += " · AsiaL"
+        if not na(vwap) and vwap != y and math.abs(y - vwap) <= tol
+            s += " · VWAP"
+    s
 
 // ¿Tapa un nivel de mayor prioridad al rótulo que está en y?
 f_tapadoPorNivel(float y, int p) =>
@@ -3033,7 +3075,16 @@ if i_s6On and confBar and not na(atr)
         [zi, zd, zp] = f_s6Zona(dir)
         bool zonaCerca = zi >= 0 and zd <= i_s6Cerca * atr
 
-        if hayBarr and zonaCerca and not mismoBar and (barrNvo or na(act))
+        //  Contra tendencia: el v5 exigía un CHoCH en la vela del ARMADO. Se
+        //  conserva, con la ventana como input y 0 = la vela exacta, que es el
+        //  comportamiento actual. Va en el ARMADO y no en el DISPARO porque es
+        //  una condición para que el setup EXISTA, no para que se ejecute, y
+        //  por eso no es uno de los cinco filtros que cuenta el diagnóstico.
+        bool contraDir = bias4h != 0 and bias4h != dir
+        int  barsChoch = esL ? barsChochUp : barsChochDn
+        bool ctrOk = (not contraDir) or barsChoch <= i_s6ChochV
+
+        if hayBarr and zonaCerca and ctrOk and not mismoBar and (barrNvo or na(act))
             float mecha = esL ? mechaSwBull : mechaSwBear
             if not na(mecha)
                 // --- SL saneado (§1.2). Tres pasos, en este orden:
@@ -3049,12 +3100,21 @@ if i_s6On and confBar and not na(atr)
                 float slR = esL ? math.floor(slBase / f_tickPoints) * f_tickPoints
                                : math.ceil( slBase / f_tickPoints) * f_tickPoints
                 float t1  = f_nivelObstruccion(esL, close)
+                //  TP1 de respaldo: solo si se pide, y el motivo lo dirá, para
+                //  no confundir un objetivo medido con uno inventado.
+                bool t1Fijo = false
+                if na(t1) and i_s6Tp1Resp
+                    float rskPrev = esL ? close - slR : slR - close
+                    if rskPrev > 0
+                        t1 := esL ? close + i_s6Tp1R * rskPrev : close - i_s6Tp1R * rskPrev
+                        t1Fijo := true
                 Zona  zc  = array.get(zones, zi)
                 [sc, det, rr] = f_s6Score(dir, close, slR, t1, zp, zc.mid)
                 s6Seq    += 1
                 s6Armados += 1
                 S6Setup ns = S6Setup.new(uid = s6Seq, dir = dir, sl = slR, tp1 = t1,
-                     score = sc, detalle = det, barArmado = bar_index,
+                     score = sc, detalle = det + (t1Fijo ? " · TP1 fijo" : ""),
+                     barArmado = bar_index,
                      barBarrido = barBarr, contra = bias4h != 0 and bias4h != dir,
                      sesion = sesIdx, mBloq = 0, mExcl = 0)
                 if esL
@@ -3083,7 +3143,14 @@ if i_s6On and confBar and not na(atr)
                  (close < open and close < low[1])
             float tope   = esL ? topeSwBull : topeSwBear
             bool rompe   = not na(tope) and (esL ? close > tope : close < tope)
-            bool okConf  = engulf or rompe
+            //  Tercera vía, solo si se pide: cierre más allá del extremo de la
+            //  vela del ARMADO.
+            bool rompeArm = false
+            if i_s6Conf != "Engulfing o ruptura del barrido"
+                int d = bar_index - act.barArmado
+                if d >= 1 and d <= 300
+                    rompeArm := esL ? close > high[d] : close < low[d]
+            bool okConf  = engulf or rompe or rompeArm
             bool okSL    = riesgoR > 0 and riesgoR <= i_s6SlMax * atr
 
             int m = 0
@@ -4036,13 +4103,13 @@ if barstate.islast
         // vistazo que el lunes muestra el viernes.
         string fPrev = f_fechaClave(prevKey)
         f_moverEtiq(lbPdh,  verPdh and f_nivelVisible(pdh, P_PD) ? pdh : na, f_corto("PDH " +
-             str.tostring(pdh, format.mintick) +
+             str.tostring(pdh, format.mintick) + f_fusion(pdh) +
              (fPrev == "" ? "" : " · " + fPrev)), color.new(color.blue, 0))
         f_moverEtiq(lbPdl,  verPdl and f_nivelVisible(pdl, P_PD) ? pdl : na, f_corto("PDL " +
-             str.tostring(pdl, format.mintick) +
+             str.tostring(pdl, format.mintick) + f_fusion(pdl) +
              (fPrev == "" ? "" : " · " + fPrev)), color.new(color.blue, 0))
-        f_moverEtiq(lbHod,  verHod     and f_nivelVisible(hod,      P_HL)   ? hod      : na, "HOD "  + str.tostring(hod,      format.mintick), color.new(color.purple, 0))
-        f_moverEtiq(lbLod,  verLod     and f_nivelVisible(lod,      P_HL)   ? lod      : na, "LOD "  + str.tostring(lod,      format.mintick), color.new(color.purple, 0))
+        f_moverEtiq(lbHod,  verHod     and f_nivelVisible(hod,      P_HL)   ? hod      : na, f_corto("HOD "  + str.tostring(hod, format.mintick) + f_fusion(hod)), color.new(color.purple, 0))
+        f_moverEtiq(lbLod,  verLod     and f_nivelVisible(lod,      P_HL)   ? lod      : na, f_corto("LOD "  + str.tostring(lod, format.mintick) + f_fusion(lod)), color.new(color.purple, 0))
         f_moverEtiq(lbSsO,  verOpen    and f_nivelVisible(sessOpen, P_OTRO) ? sessOpen : na, "Open " + str.tostring(sessOpen, format.mintick), color.new(color.gray,  20))
         f_moverEtiq(lbVwap, verVwapLvl and f_nivelVisible(vwap,     P_VWAP) ? vwap     : na, "VWAP " + str.tostring(vwap,     format.mintick), color.new(color.orange, 0))
     else
@@ -4059,8 +4126,12 @@ if barstate.islast
 f_biasTxt(int b) => b ==  1 ? "alcista" : b == -1 ? "bajista" : "rango"
 f_biasCol(int b) => b ==  1 ? color.new(color.teal, 0) : b == -1 ? color.new(color.maroon, 0) : color.new(color.gray, 0)
 
-const int N_DIAG = 30
-var table diag = table.new(position.top_right, 2, N_DIAG, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50))
+const int N_DIAG = 32
+//  Fondo semitransparente (v5.3 §1.4): el panel tiene que leerse SOBRE las
+//  velas sin taparlas. 88 deja ver la vela debajo y el texto encima.
+var table diag = table.new(position.top_right, 2, N_DIAG, border_width = 1,
+     frame_width = 1, frame_color = color.new(color.gray, 50),
+     bgcolor = color.new(chart.bg_color, 12))
 
 // Escribe una fila y devuelve la siguiente libre. Si no hay dato, no escribe y
 // devuelve la misma: así la fila no deja un hueco en blanco (v2.7 §5). Una fila
@@ -4082,7 +4153,8 @@ f_filaDiag(int r, string k, string v, color c) =>
 //  recalcula aquí, para que la tabla y la etiqueta digan siempre lo mismo.
 const int N_LIMPIA = 5
 var table limpia = table.new(position.top_right, 2, N_LIMPIA, border_width = 1,
-     frame_width = 1, frame_color = color.new(color.gray, 40))
+     frame_width = 1, frame_color = color.new(color.gray, 40),
+     bgcolor = color.new(chart.bg_color, 12))
 
 f_filaLimpia(int r, string k, string v, color c) =>
     bool hay = v != "" and v != "—"
@@ -4152,7 +4224,8 @@ if i_soloAlta and barstate.islast
 const int N_REG_FILAS = 10
 const int N_REG = N_REG_FILAS + 8
 var table reg = table.new(position.bottom_right, 8, N_REG, border_width = 1,
-     frame_width = 1, frame_color = color.new(color.gray, 40))
+     frame_width = 1, frame_color = color.new(color.gray, 40),
+     bgcolor = color.new(chart.bg_color, 12))
 
 //  Marca de muestra insuficiente para CUALQUIER desglose. 40 es el umbral del
 //  encargo: por debajo, la cifra se da pero en gris y con la n al lado.
@@ -4291,7 +4364,8 @@ const int N_MIN_MUESTRA = 30
 const int N_GRUPOS = 15
 const int N_RES = 17
 var table res = table.new(position.bottom_right, 7, N_RES, border_width = 1,
-     frame_width = 1, frame_color = color.new(color.gray, 40))
+     frame_width = 1, frame_color = color.new(color.gray, 40),
+     bgcolor = color.new(chart.bg_color, 12))
 
 if i_verResultados and verExtras and barstate.islast
     array<string> gNom = array.from("FVG5", "FVG1H", "FVG4H", "SWP", "SB", "ASIA",
@@ -4516,6 +4590,13 @@ if i_showTable and verExtras and barstate.islast
         int vivos = (na(s6L) ? 0 : 1) + (na(s6S) ? 0 : 1)
         s6Txt := str.tostring(s6Armados) + " armados → " + str.tostring(s6Disparos) +
              " disparos · " + str.tostring(vivos) + " vivos"
+    //  §1.4 · aviso de temporalidad DENTRO del panel, para que se vea en
+    //  cualquier marco. El script está pensado para 5 minutos: el ATR, el techo
+    //  de stop y los marcos superiores están calibrados a eso.
+    r := f_filaDiag(r, "Temporalidad",
+         timeframe.period == "5" ? "" : "AVISO · pensado para 5m, estás en " + timeframe.period,
+         color.new(color.orange, 0))
+
     r := f_filaDiag(r, "S6 armados", s6Txt, chart.fg_color)
 
     string s6Blo = ""
