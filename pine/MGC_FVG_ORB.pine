@@ -386,6 +386,24 @@ i_showSig   = input.bool(true, "Etiquetas COMPRA / VENTA",      group = G_VIS,
 //  una inferencia SIN COMPROBAR, no un hecho, y el espejo de una estrategia
 //  perdedora no es automáticamente ganadora: entre las dos se queda la
 //  comisión, el slippage y todas las veces que la ruptura no falla.
+// --- Filtro de chop por percentil de ATR (portado del indicador v5) ---------
+//  El filtro de hora plana mide el rango MEDIO de cada hora del día; este mide
+//  la volatilidad de HOY contra las últimas N sesiones. Son dos cosas
+//  distintas: una dice "a esta hora nunca pasa nada" y la otra "hoy no está
+//  pasando nada". Un día muerto a una hora normalmente buena solo lo caza el
+//  segundo.
+const string G_CHOP = "Filtro de chop"
+i_chopOn    = input.bool(false, "Vetar entradas en volatilidad comprimida", group = G_CHOP,
+     tooltip = "APAGADO. Veta si el ATR medio de la sesión en curso está por debajo del percentil elegido de las últimas N sesiones, o " +
+               "si el precio vive dentro de un rango estrecho comparado con el ATR. En rango comprimido los barridos son ruido.")
+i_chopPct   = input.int(30, "Percentil de ATR por debajo del cual es chop", minval = 5, maxval = 60, group = G_CHOP,
+     tooltip = "Se calcula sobre la cola de 20 sesiones que el script ya mantiene para la fila 'ATR 20 sesiones' del diagnóstico. La " +
+               "ventana es fija a propósito: duplicar la cola habría dejado dos sitios con el mismo dato y dos sitios donde " +
+               "equivocarse.")
+i_chopRango = input.float(3.0, "…o rango de 20 velas por debajo de (x ATR)", minval = 0.5, maxval = 10.0, step = 0.5, group = G_CHOP,
+     tooltip = "Segunda condición, independiente del percentil: si el rango de las últimas 20 velas cabe en este múltiplo del ATR y el " +
+               "precio está dentro de él, es rango activo. Ponlo a 0 para desactivar solo esta mitad.")
+
 const string G_S1 = "S1 · Barrido de liquidez"
 i_s1On      = input.bool(false, "Activar S1 · barrido de liquidez", group = G_S1,
      tooltip = "APAGADO. Hipótesis sin validar: el espejo del ORB que ya mediste. Enciéndelo para medirlo, no porque esté comprobado.")
@@ -1095,6 +1113,39 @@ if velasDia >= i_regMinVel
         regimen := na(regRatio) ? 0 : (okRango and okDespl) ? 1 : -1
 
 string regTxt = regimen == 1 ? "TENDENCIA" : regimen == -1 ? "RANGO" : "sin clasificar"
+
+// --- Chop: volatilidad comprimida (portado del indicador v5) ----------------
+//  Se guarda el ATR medio de cada sesión en una cola y se compara el de hoy
+//  con el percentil de las últimas N. Medido sobre el propio gráfico: una tabla
+//  de umbrales de volatilidad sería un nivel hardcodeado, y además el régimen
+//  de volatilidad cambia.
+//
+//  NO se añade un acumulador nuevo: se reutiliza `atrSes`, la cola de 20
+//  sesiones que ya existía para la fila "ATR 20 sesiones" de §5.3. Duplicar el
+//  estado habría dejado dos colas con el mismo contenido y dos sitios donde
+//  equivocarse, y además habría obligado a que el tamaño de una moviera la otra.
+//  El precio de reutilizarla es que la ventana queda fija en 20 sesiones, que
+//  es además lo que la fila de diagnóstico dice que mide.
+//
+//  Las series con estado se calculan SIEMPRE en ámbito global, aunque el filtro
+//  esté apagado: meterlas detrás de `if i_chopOn` las evaluaría de forma
+//  intermitente y su historial saldría mal al encenderlo, sin dar ningún error.
+f_pctlChop(array<float> a, int pct) =>
+    float r = na
+    if array.size(a) >= 5
+        array<float> c = array.copy(a)
+        array.sort(c, order.ascending)
+        int idx = math.min(array.size(c) - 1,
+             math.max(0, int(math.round(pct / 100.0 * (array.size(c) - 1)))))
+        r := array.get(c, idx)
+    r
+
+float atrPctl  = f_pctlChop(atrSes, i_chopPct)
+float chopHi   = ta.highest(high, 20)
+float chopLo   = ta.lowest(low, 20)
+bool  chopApre = i_chopRango > 0 and (chopHi - chopLo) < i_chopRango * nz(atr, 0) and
+     close < chopHi and close > chopLo
+bool  esChop   = (not na(atrPctl) and nz(atr, 0) < atrPctl) or chopApre
 
 // =============================================================================
 //  5 · FAIR VALUE GAPS
@@ -2046,7 +2097,8 @@ const int V_FUERZA  = 512
 const int V_ADR     = 1024
 const int V_NOALTA  = 2048
 const int V_HORA    = 4096
-const int N_VETOS   = 13
+const int V_CHOP    = 8192
+const int N_VETOS   = 14
 
 var array<int> vetoBloq = array.new_int(N_VETOS, 0)
 var array<int> vetoExcl = array.new_int(N_VETOS, 0)
@@ -2068,7 +2120,8 @@ f_vetoName(int idx) =>
         9  => "fuerza mínima"
         10 => "ADR agotado"
         11 => "no ALTA"
-        => "hora plana"
+        12 => "hora plana"
+        => "chop"
 
 // Obstrucción combinada: zonas del marco mayor y, si se han activado, niveles
 // de sesión. Una sola puerta para que la máscara y el objetivo lean lo mismo.
@@ -2159,6 +2212,11 @@ f_mascara(int dir, float entrada, float stop, bool esFvg, int zScore) =>
     // que hace viable operar a cualquier hora con un cupo de una al día.
     if f_horaDebil()
         m += V_HORA
+
+    // Volatilidad comprimida: en rango apretado los barridos son ruido. Portado
+    // del indicador v5, donde era un filtro de disparo.
+    if i_chopOn and esChop
+        m += V_CHOP
 
     // Solo zonas ALTA: solo puede vetar si existe tabla calibrada. Sin ella el
     // input está forzado a off y este bit nunca se activa, porque vetaría todo.
@@ -3394,7 +3452,7 @@ if barstate.islast
 f_biasTxt(int b) => b ==  1 ? "alcista" : b == -1 ? "bajista" : "rango"
 f_biasCol(int b) => b ==  1 ? color.new(color.teal, 0) : b == -1 ? color.new(color.maroon, 0) : color.new(color.gray, 0)
 
-const int N_DIAG = 22
+const int N_DIAG = 24
 var table diag = table.new(position.top_right, 2, N_DIAG, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50))
 
 // Escribe una fila y devuelve la siguiente libre. Si no hay dato, no escribe y
@@ -3718,6 +3776,16 @@ if i_showTable and verExtras and barstate.islast
          nConflictos == 0 ? "" : str.tostring(nConflictos) + " velas · " +
          (i_conflicto == "No operar ninguna" ? "sin operar" : "manda la prioridad"),
          color.new(color.orange, 0))
+
+    //  Chop: el dato crudo al lado, para poder mover el percentil con números
+    //  del gráfico. Solo sale si el filtro está encendido o si hay cola.
+    string chopFila = ""
+    if array.size(atrSes) >= 5
+        chopFila := (esChop ? "SÍ" : "no") + " · ATR " + str.tostring(nz(atr, 0), "#.##") +
+             " vs p" + str.tostring(i_chopPct) + " " + str.tostring(atrPctl, "#.##") +
+             (chopApre ? " · rango apretado" : "") + (i_chopOn ? "" : " · filtro apagado")
+    r := f_filaDiag(r, "Chop", chopFila,
+         esChop ? color.new(color.orange, 0) : color.new(color.gray, 10))
 
     r := f_filaDiag(r, "Régimen del día", regFila,
          regimen == 1 ? color.new(color.teal, 0) :
