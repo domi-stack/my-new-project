@@ -3,8 +3,8 @@
 Documento de contexto para continuar el trabajo en otra conversación. Fecha: 12 de octubre de 2026.
 
 **Fichero**: `pine/MGC_FVG_ORB.pine` · Pine Script v6 · `strategy()` · MGC 5 minutos
-**Tamaño**: 2895 líneas, 85 inputs
-**Versión**: v2.7 (limpieza visual, y dos bugs de niveles corregidos)
+**Tamaño**: 3.754 líneas, 136 inputs
+**Versión**: v2.8 (cinco fuentes de señal nuevas, S1 a S5, todas apagadas)
 **Segundo fichero**: `pine/MGC_v5_indicador.pine` · v5.2 · 1.295 líneas, 31 inputs · `indicator()` · 24 h, puerta de calidad única. **Falta su versión `strategy()`**, que estaba pedida en el mismo encargo.
 **Repos**: `domi-stack/crisol` (main) y `domi-stack/my-new-project` (rama `claude/orb-day-trading-bot-es-3bo9db`, PR #1 abierto)
 
@@ -192,6 +192,33 @@ Tres decisiones que conviene no revertir por descuido:
 3. **TP1 y SL en la misma vela cuentan como SL.** No se sabe cuál llegó antes, y quedarse con el bueno es mentirse en la propia calibración.
 
 `f_archivar` corta cajas y líneas en la vela del cierre y las guarda en colas de 120 etiquetas, 240 cajas y 330 líneas (120 disparos completos, con margen bajo los 500 de la declaración para zonas, niveles y el setup vivo). Input nuevo `i_verHist`, encendido.
+
+---
+
+### v2.8 · Cinco fuentes de señal nuevas (S1 a S5)
+
+Ocho commits (`62ec8d6` a `26dc416`). **Todas apagadas por defecto.** El documento propio es `docs/ESTRATEGIAS_S1_S5.md`; aquí va solo lo que un relevo necesita saber para no romperlo.
+
+**La arquitectura, que es la decisión importante.** Las cinco estrategias **no reimplementan la ejecución**. Cada una deja un `Cand` en una lista y un resolutor elige uno, que entra por el mismo embudo de siempre: máscara de vetos, dimensionamiento, redondeo a ticks y `strategy.entry`. Tres consecuencias:
+
+1. **La regresión se sostiene estructuralmente.** Con las cinco apagadas la lista está vacía, el bucle del resolutor no se ejecuta, y los cinco puntos donde el embudo consulta lo nuevo están detrás de `setKind == "Estrategia"`, que nunca es verdad. No hay una sola instrucción nueva en el camino hasta la orden. **Esto no se ha verificado contra el Strategy Tester** porque aquí no hay TradingView; el argumento es estructural, no empírico.
+2. Las estrategias nuevas pasan por **todos** los vetos existentes, así que la fila de vetos exclusivos dice cuál las ahoga.
+3. Añadir una sexta estrategia es escribir un bloque que llame a `f_addCand` y añadir un grupo a la tabla. Nada más.
+
+**Orden de los commits, y por qué ese orden.** La instrumentación va **primero** (`62ec8d6`): añadir cinco estrategias a la vez multiplica el riesgo de encontrar ruido, y un total positivo puede venir de una sola fuente mientras las otras pierden. Si la medición no está en pie antes, no hay forma de saberlo.
+
+**Tres trampas que ya costaron tiempo y conviene no reintroducir:**
+
+1. **`esAsia` necesita el `not esNueva`.** Sin él, un candidato de S1 que cayera en la misma vela que un barrido del rango asiático se tomaría por un disparador ASIA y se le aplicaría el stop del otro.
+2. **La condición de S2 está hoisteada a una variable** en vez de envolver el `if` en dos líneas. Una condición partida seguida de un cuerpo indentado es justo donde la regla de indentación de Pine se vuelve ambigua.
+3. **`max_bars_back = 500` es necesario**, no decorativo: `close[k]` en S1 y `vwap[N]` en S2 son desplazamientos **variables**, y Pine no siempre infiere el buffer cuando el índice no es constante.
+
+**Dos añadidos míos, declarados como tales en el código y en el documento:**
+
+- el clasificador de régimen por defecto exige **además** un desplazamiento neto mínimo, porque el rango por sí solo llama «tendencia» a un día de bandazos que cierra donde abrió. Con el umbral a 0 queda el criterio tal como se especificó;
+- S5 por defecto **mide** la hipótesis del sesgo horario en los propios datos en vez de aplicarla, con el nuevo acumulador de deriva por hora. El modo «hipótesis fija» existe para contrastar.
+
+**Lo que queda explícitamente sin validar:** las cinco. S1 es una inferencia sobre el espejo del ORB, no un hecho. S2 y S3 son hipótesis **y** solo se pueden medir a medias con datos de spot, porque su VWAP es una aproximación. S4 es hipótesis y además depende de una norma de prop firm sin comprobar.
 
 ---
 
