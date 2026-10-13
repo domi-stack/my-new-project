@@ -539,6 +539,66 @@ i_s5MinScr  = input.int(0, "Puntuación mínima del candidato (0 = no descarta)"
      tooltip = "ESTE es el input que convierte S5 en un filtro de verdad. Con 0, S5 solo describe. Un candidato arranca en 50, así que " +
                "con peso 15 un candidato en contra del sesgo baja a 35: pon 40 aquí para descartarlo y 0 para no descartar nada.")
 
+// --- S6 · barrido con confirmación · ARMADO -> DISPARO (encargo 2, v5.3) ----
+//  Portada del indicador v5.2, que es donde se diagnosticó el problema: cero
+//  disparos en cinco días con decenas de ARMADO. Aquí entra como una fuente
+//  más, así que la mide la misma tabla por estrategia que a S1-S5.
+//
+//  DIAGNÓSTICO DE PARTIDA, que es lo que esta versión viene a arreglar:
+//   · el ARMADO vivo tenía score 57 contra un umbral de 65
+//   · el SL caía a 0,58 puntos, DENTRO del spread, y de ahí salía un R:R de
+//     13,6R que no era una oportunidad sino un artefacto del denominador
+//   · los ARMADO salían en racimos, rearmándose en cada vela mientras durase
+//     la memoria del barrido
+//
+//  Los tres umbrales son inputs CON LOS VALORES ACTUALES como defecto. La
+//  fase 2 del encargo solo cambiará los defectos de los filtros que el
+//  contador exclusivo señale, con 20 sesiones medidas delante.
+const string G_S6 = "S6 · Barrido con confirmación"
+i_s6On      = input.bool(false, "Activar S6 · barrido con confirmación", group = G_S6,
+     tooltip = "APAGADA. Es la máquina ARMADO -> DISPARO del indicador v5, con el saneamiento de SL de la v5.3. Se mide en la tabla " +
+               "por estrategia igual que S1-S5.")
+i_s6Umbral  = input.int(65, "Score mínimo a favor del sesgo",  minval = 30, maxval = 100, group = G_S6)
+i_s6UmbralC = input.int(65, "Score mínimo contra el sesgo",    minval = 30, maxval = 100, group = G_S6,
+     tooltip = "Ir contra el sesgo ya cuesta puntos en el propio score, así que este umbral exige además que casi todo lo demás esté a " +
+               "favor. Hoy vale lo mismo que el otro: es uno de los candidatos a relajar en la fase 2.")
+i_s6RrMin   = input.float(1.5, "R:R mínimo hasta TP1", minval = 0.5, maxval = 10.0, step = 0.1, group = G_S6)
+i_s6Inval   = input.int(12, "Velas sin disparar hasta invalidar", minval = 2, maxval = 100, group = G_S6)
+i_s6Cerca   = input.float(0.5, "Proximidad exigida a la zona (x ATR)", minval = 0.1, maxval = 3.0, step = 0.1, group = G_S6)
+i_s6Chop    = input.bool(true, "Usar el filtro de chop en S6", group = G_S6,
+     tooltip = "Independiente del veto global de chop: este solo afecta a S6, y es el que el v5 aplicaba al disparo.")
+i_s6SlMin   = input.float(0.8, "SL mínimo (x ATR)", minval = 0.0, maxval = 3.0, step = 0.1, group = G_S6,
+     tooltip = "Si la mecha del barrido queda más cerca que esto, el SL se ALEJA hasta este mínimo.\n\n" +
+               "AVISO: esto REDUCE el R:R de los setups actuales, no lo aumenta. El ARMADO de 13,6R del diagnóstico pasa a unos 2,2R " +
+               "con un ATR de 4,5. Es correcto y deliberado: aquel R:R venía de un denominador casi nulo. Espera que parte de lo que " +
+               "hoy parece atractivo deje de pasar el filtro de R:R mínimo.")
+i_s6SlMax   = input.float(2.5, "SL máximo (x ATR)", minval = 0.5, maxval = 10.0, step = 0.1, group = G_S6,
+     tooltip = "Por encima de esto NO se dispara. Un stop más ancho que esto no es una operación, es una posición.")
+i_s6Spread  = input.float(0.3, "Colchón de spread (USD/oz)", minval = 0.0, maxval = 5.0, step = 0.05, group = G_S6,
+     tooltip = "Se suma al SL en unidades de precio, no en ticks, para que valga igual en MGC que en XAUUSD. Un SL dentro del spread " +
+               "no es un SL.")
+i_s6Diag    = input.bool(true, "Modo diagnóstico de S6", group = G_S6,
+     tooltip = "Cuenta, por cada ARMADO que caduca o se invalida, QUÉ filtros impidieron el disparo. Dos cifras por filtro: cuántas " +
+               "veces bloqueó (falle o no otro) y cuántas veces fue el ÚNICO que bloqueaba.\n\n" +
+               "EL EXCLUSIVO ES EL QUE IMPORTA: son los disparos que ganarías relajando SOLO ese filtro. Sin esto, decidir qué " +
+               "relajar es adivinar.")
+
+// --- Pesos del score de S6 · A PRIORI, NO VALIDADOS -------------------------
+//  Son los del indicador v5 y suman 100. NO se tocan: el encargo lo prohíbe
+//  expresamente y con razón, porque son siete grados de libertad y cualquier
+//  combinación encuentra oro en una muestra pequeña. Lo que se ajusta son los
+//  umbrales y el R:R, que son dos.
+//  Van aparte de los pesos del score de ZONA: son dos puntuaciones distintas
+//  que miden cosas distintas, y mezclarlas haría que mover una moviera la otra.
+const string G_S6S = "S6 · Pesos del score"
+w6_alin   = input.int(25, "Peso · alineación multimarco",        minval = 0, maxval = 60, group = G_S6S)
+w6_zona   = input.int(20, "Peso · calidad de la zona",           minval = 0, maxval = 60, group = G_S6S)
+w6_barr   = input.int(15, "Peso · barrido de liquidez",          minval = 0, maxval = 60, group = G_S6S)
+w6_despl  = input.int(15, "Peso · fuerza del desplazamiento",    minval = 0, maxval = 60, group = G_S6S)
+w6_vol    = input.int(10, "Peso · volumen relativo del gatillo", minval = 0, maxval = 60, group = G_S6S)
+w6_rr     = input.int(15, "Peso · R:R disponible",               minval = 0, maxval = 60, group = G_S6S)
+w6_penExt = input.int(20, "Penalización máxima por extensión",   minval = 0, maxval = 60, group = G_S6S)
+
 const string G_REG = "Régimen de mercado"
 i_clasReg   = input.string("Rango del día / ATR", "Clasificador tendencia-rango",
      options = ["Rango del día / ATR", "ADX", "Persistencia respecto al VWAP"], group = G_REG,
@@ -579,6 +639,7 @@ i_prioridad = input.string("FVG primero", "Prioridad cuando varias fuentes dispa
 i_cupoS1    = input.int(0, "Cupo diario propio · S1 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP)
 i_cupoS2    = input.int(0, "Cupo diario propio · S2 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP)
 i_cupoS3    = input.int(0, "Cupo diario propio · S3 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP)
+i_cupoS6    = input.int(0, "Cupo diario propio · S6 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP)
 i_cupoS4    = input.int(0, "Cupo diario propio · S4 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP,
      tooltip = "Un cupo propio ACOTA esa estrategia, no le reserva sitio: el límite diario global sigue mandando por encima. Con 0 la " +
                "estrategia no tiene tope propio y compite solo por el cupo global.")
@@ -1014,6 +1075,15 @@ bool esSweepAsia = swpAsiaLo or swpAsiaHi
 int barsSwBull = nz(ta.barssince(sweepBull), 999999)
 int barsSwBear = nz(ta.barssince(sweepBear), 999999)
 
+//  Extremos de la vela del último barrido de cada lado, y volumen medio. Todo
+//  en ámbito global y sin condicionar: son series con estado y los usa S6.
+float mechaSwBull = ta.valuewhen(sweepBull, low,  0)
+float mechaSwBear = ta.valuewhen(sweepBear, high, 0)
+float topeSwBull  = ta.valuewhen(sweepBull, high, 0)
+float topeSwBear  = ta.valuewhen(sweepBear, low,  0)
+float volSma20    = ta.sma(volume, 20)
+
+
 bool sweepBullRecent = barsSwBull <= i_sweepLook
 bool sweepBearRecent = barsSwBear <= i_sweepLook
 
@@ -1046,6 +1116,14 @@ float vwapDn = vwap - i_vwapMult * vwapSd
 bool enAsia = not na(time(timeframe.period, i_sesAsia, "America/New_York"))
 bool enLon  = not na(time(timeframe.period, i_sesLon,  "America/New_York"))
 bool enSB   = not na(time(timeframe.period, i_sesSB,   "America/New_York"))
+
+//  Índice de sesión, para la estadística por sesión del registro de S6.
+//  0 Asia · 1 Londres · 2 Nueva York · 3 fuera de las tres. La sesión de NY se
+//  declara aquí y no como input porque es la única de las tres que el script no
+//  usaba todavía, y su horario (08:00-17:00 ET) no es ajustable en las otras.
+bool   enNY   = not na(time(timeframe.period, "0800-1700", "America/New_York"))
+int    sesIdx = enNY ? 2 : enLon ? 1 : enAsia ? 0 : 3
+string sesTxt = sesIdx == 2 ? "NY" : sesIdx == 1 ? "Londres" : sesIdx == 0 ? "Asia" : "—"
 
 // Acumulación de la sesión en curso.
 var float asiaHi = na
@@ -2350,11 +2428,12 @@ f_candVale(Cand c) => c.score >= i_s5MinScr
 //  acumuladores incrementales y no un recuento de la tabla: la tabla solo se
 //  calcula en la última vela, y esto hay que consultarlo en cada señal.
 //  Índices: 0 FVG · 1 S1 · 2 S2 · 3 S3 · 4 S4.
-var array<int>   famN = array.new_int(5, 0)
-var array<float> famR = array.new_float(5, 0.0)
+var array<int>   famN = array.new_int(6, 0)
+var array<float> famR = array.new_float(6, 0.0)
 
 f_famIdx(string estr) =>
-    estr == "S1" ? 1 : estr == "S2" ? 2 : estr == "S3" ? 3 : estr == "S4" ? 4 : 0
+    estr == "S1" ? 1 : estr == "S2" ? 2 : estr == "S3" ? 3 : estr == "S4" ? 4 :
+         estr == "S6" ? 5 : 0
 
 //  ¿Sigue viva esta fuente? Con i_autoOff apagado, siempre.
 f_famViva(string estr) =>
@@ -2371,6 +2450,7 @@ var int opsS1       = 0
 var int opsS2       = 0
 var int opsS3       = 0
 var int opsS4       = 0
+var int opsS6       = 0
 var int nConflictos = 0
 if nuevoDia
     opsFvgDia := 0
@@ -2378,6 +2458,7 @@ if nuevoDia
     opsS2     := 0
     opsS3     := 0
     opsS4     := 0
+    opsS6     := 0
 
 //  Un cupo propio ACOTA la estrategia, no le reserva sitio: el límite diario
 //  global sigue mandando por encima. Con 0 no hay tope propio.
@@ -2391,6 +2472,8 @@ f_cupoLibre(string estr) =>
         ok := false
     if estr == "S4" and i_cupoS4 > 0 and opsS4 >= i_cupoS4
         ok := false
+    if estr == "S6" and i_cupoS6 > 0 and opsS6 >= i_cupoS6
+        ok := false
     ok
 
 //  Rango de prioridad: menor gana. En el modo rotatorio el rango ES el número
@@ -2400,14 +2483,14 @@ f_prioFuente(string estr) =>
     int p = 0
     if i_prioridad == "Estrategias nuevas primero"
         p := estr == "FVG" ? 9 : estr == "S1" ? 0 : estr == "S2" ? 1 :
-             estr == "S3" ? 2 : 3
+             estr == "S3" ? 2 : estr == "S4" ? 3 : 4
     else if i_prioridad == "La que menos haya operado hoy"
         p := estr == "FVG" ? opsFvgDia * 10 : estr == "S1" ? opsS1 * 10 + 1 :
              estr == "S2" ? opsS2 * 10 + 2 : estr == "S3" ? opsS3 * 10 + 3 :
-             opsS4 * 10 + 4
+             estr == "S4" ? opsS4 * 10 + 4 : opsS6 * 10 + 5
     else
         p := estr == "FVG" ? 0 : estr == "S1" ? 1 : estr == "S2" ? 2 :
-             estr == "S3" ? 3 : 4
+             estr == "S3" ? 3 : estr == "S4" ? 4 : 5
     p
 
 // --- S1 · barrido de liquidez (falsa ruptura) -------------------------------
@@ -2714,6 +2797,304 @@ if s4EnVentana
         if rsk > 0
             f_addCand("S4", 1, stp, close + i_s4R * rsk,
                  "S4 fallo de la ruptura a la baja del rango de la noticia")
+
+// =============================================================================
+//  7c · S6 · BARRIDO CON CONFIRMACIÓN · ARMADO -> DISPARO (encargo 2)
+// =============================================================================
+//  Dos pasos, al contrario que S1-S5, que deciden en una sola vela:
+//   ARMADO  · hay barrido con zona cerca. Se calcula el plan y se espera.
+//   DISPARO · llega la confirmación Y pasan los cinco filtros. Se emite el
+//             candidato, que entra por el embudo de §8 como cualquier otro.
+//  Un ARMADO que no dispara en i_s6Inval velas caduca, y al caducar se CUENTA
+//  por qué no disparó. Eso es el modo diagnóstico, y es lo que convierte
+//  "no dispara nunca" en una lista de culpables ordenada.
+
+type S6Setup
+    int    uid
+    int    dir
+    float  sl
+    float  tp1
+    int    score
+    string detalle
+    int    barArmado
+    int    barBarrido   // vela del barrido que lo originó: evita los rearmes
+    bool   contra
+    int    sesion
+    int    mBloq        // filtros que bloquearon alguna vez
+    int    mExcl        // filtros que alguna vez fueron el ÚNICO que bloqueaba
+
+var S6Setup s6L = na
+var S6Setup s6S = na
+var int     s6Seq = 0
+
+//  Cinco filtros, cinco pares de contadores.
+const int S6_SCORE = 1
+const int S6_RR    = 2
+const int S6_CHOP  = 4
+const int S6_CONF  = 8
+const int S6_SL    = 16
+const int N_S6F    = 5
+
+f_s6FiltroNom(int idx) =>
+    switch idx
+        0 => "score"
+        1 => "R:R"
+        2 => "chop"
+        3 => "sin confirmación"
+        => "SL fuera"
+
+var array<int> s6Bloq = array.new_int(N_S6F, 0)
+var array<int> s6Excl = array.new_int(N_S6F, 0)
+var int s6Armados   = 0
+var int s6Disparos  = 0
+
+//  Pone un bit sin operadores a nivel de bit, que Pine no tiene: si ya está, no
+//  se suma otra vez.
+f_s6Bit(int m, int bit) => f_vetoTiene(m, bit) ? m : m + bit
+
+//  Al morir un ARMADO se reparte la culpa. `bloquea` cuenta cada filtro que
+//  falló alguna vez; `exclusivo` solo los que alguna vez fueron el único que
+//  faltaba, que son los disparos que se ganarían relajando SOLO ese filtro.
+f_s6Contar(S6Setup s) =>
+    if not na(s)
+        for idx = 0 to N_S6F - 1
+            int bit = f_vetoBit(idx)
+            if f_vetoTiene(s.mBloq, bit)
+                array.set(s6Bloq, idx, array.get(s6Bloq, idx) + 1)
+            if f_vetoTiene(s.mExcl, bit)
+                array.set(s6Excl, idx, array.get(s6Excl, idx) + 1)
+
+//  Zona viva más cercana en la dirección pedida, con su distancia. Devuelve el
+//  peso equivalente al del v5 a partir de la prioridad del marco.
+f_s6Zona(int dir) =>
+    int   best = -1
+    float bd   = 1e12
+    int   peso = 0
+    if array.size(zones) > 0
+        for i = 0 to array.size(zones) - 1
+            Zona z = array.get(zones, i)
+            if z.state <= 1 and not z.fired and z.dir == dir
+                float d = math.abs(z.mid - close)
+                if d < bd
+                    bd   := d
+                    best := i
+                    peso := z.prio == 3 ? 10 : z.prio == 2 ? 7 : 4
+    [best, bd, peso]
+
+//  Un marco a favor vale entero, en rango la mitad, en contra cero.
+f_alin(int b, int dir) => b == dir ? 1.0 : b == 0 ? 0.5 : 0.0
+
+//  Spot o futuros: en spot el volumen es cuenta de ticks. Es un bool local de
+//  S6, sin ningún aviso en pantalla asociado: el cartel de spot se retiró en la
+//  v2.7 §6 y no vuelve.
+bool s6EsSpot = not (str.startswith(syminfo.ticker, "MGC") or
+     str.startswith(syminfo.ticker, "GC"))
+
+//  Cuántos niveles de referencia hay a menos de 0,3 ATR del precio dado, con
+//  tope de dos: la tercera confluencia ya no añade información. Misma tolerancia
+//  que usa la confluencia del score de zona, para que las dos puntuaciones no
+//  discrepen sobre qué es "coincidir".
+f_confluenciaS6(float precio) =>
+    float tol = 0.3 * nz(atr, 0)
+    int   n   = 0
+    if tol > 0
+        if not na(pdh) and math.abs(precio - pdh) <= tol
+            n += 1
+        if not na(pdl) and math.abs(precio - pdl) <= tol
+            n += 1
+        if not na(asiaHiFijo) and math.abs(precio - asiaHiFijo) <= tol
+            n += 1
+        if not na(asiaLoFijo) and math.abs(precio - asiaLoFijo) <= tol
+            n += 1
+        if not na(vwap) and math.abs(precio - vwap) <= tol
+            n += 1
+        float paso = str.tonumber(i_pasoRedondo)
+        if not na(paso) and paso > 0 and
+             math.abs(precio - math.round(precio / paso) * paso) <= tol
+            n += 1
+    math.min(n, 2)
+
+//  Score de S6. Pesos A PRIORI, no validados, y el encargo prohíbe tocarlos.
+//  Es una puntuación DISTINTA de la del score de zona: mide el setup completo,
+//  no la zona sola.
+f_s6Score(int dir, float entrada, float sl, float tp1, int pesoZona, float precioZona) =>
+    int    s   = 0
+    string det = ""
+
+    // 1 · Alineación multimarco: 4H 40 %, 1H 32 %, 5m 28 %.
+    int pA = int(math.round(w6_alin * (0.40 * f_alin(bias4h, dir) +
+         0.32 * f_alin(bias1h, dir) + 0.28 * f_alin(bias5, dir))))
+    s   += pA
+    det += "alin " + str.tostring(pA)
+
+    // 2 · Calidad de la zona: marco más confluencia.
+    int pM = int(math.round(pesoZona / 10.0 * (w6_zona * 0.5)))
+    int pC = f_confluenciaS6(precioZona) * int(math.round(w6_zona * 0.25))
+    s   += pM + pC
+    det += " · zona " + str.tostring(pM + pC)
+
+    // 3 · Barrido presente.
+    int pB = (dir == 1 ? sweepBullRecent : sweepBearRecent) ? w6_barr : 0
+    s   += pB
+    det += " · barr " + str.tostring(pB)
+
+    // 4 · Desplazamiento: cuerpo contra ATR.
+    float cuerpo = math.abs(close - open) / math.max(nz(atr, 1), 0.01)
+    int pD = cuerpo >= 1.5 ? w6_despl : cuerpo >= 1.0 ? int(w6_despl * 0.67) :
+         cuerpo >= 0.6 ? int(w6_despl * 0.33) : 0
+    s   += pD
+    det += " · despl " + str.tostring(pD)
+
+    // 5 · Volumen relativo. En spot el volumen es cuenta de ticks y no es
+    //     comparable, así que puntúa neutro: penalizar por un dato que no
+    //     existe sería inventarse una medida.
+    int pV = 0
+    if s6EsSpot
+        pV := int(math.round(w6_vol * 0.6))
+    else
+        float vr = nz(volume) / math.max(nz(volSma20), 1)
+        pV := vr >= 1.5 ? w6_vol : vr >= 1.0 ? int(w6_vol * 0.6) : 0
+    s   += pV
+    det += " · vol " + str.tostring(pV)
+
+    // 6 · R:R disponible hasta TP1.
+    float riesgo = math.abs(entrada - sl)
+    float rr = riesgo > 0 and not na(tp1) ? math.abs(tp1 - entrada) / riesgo : na
+    int pR = na(rr) ? 0 : rr >= 2.5 ? w6_rr : rr >= 2.0 ? int(w6_rr * 0.8) :
+         rr >= 1.5 ? int(w6_rr * 0.53) : 0
+    s   += pR
+    det += " · R:R " + str.tostring(pR)
+
+    // 7 · Penalización por extensión, solo contra el sesgo.
+    int pen = 0
+    if bias4h != 0 and bias4h != dir and not na(vwap) and nz(atr, 0) > 0
+        float dv = math.abs(close - vwap) / atr
+        pen := dv > 3.0 ? w6_penExt : dv > 2.0 ? int(w6_penExt * 0.5) : 0
+    s   -= pen
+    if pen > 0
+        det += " · ext -" + str.tostring(pen)
+
+    [math.max(0, math.min(100, s)), det, rr]
+
+// --- La máquina ------------------------------------------------------------
+if i_s6On and confBar and not na(atr)
+    for dir = -1 to 1 by 2
+        bool     esL = dir == 1
+        S6Setup  act = esL ? s6L : s6S
+
+        // --- Caducidad. Al morir se reparte la culpa (§1.1).
+        if not na(act) and bar_index - act.barArmado > i_s6Inval
+            if i_s6Diag
+                f_s6Contar(act)
+            act := na
+            if esL
+                s6L := na
+            else
+                s6S := na
+
+        // --- ARMADO · sin rearmes en cascada (§1.3)
+        //  Solo se arma si el barrido es NUEVO en esta vela, o si no hay nada
+        //  activo en esta dirección. Y si el barrido es el MISMO que originó el
+        //  setup vivo, no se toca nada: ni se sustituye ni se reinicia
+        //  barArmado. Eso es lo que producía los racimos del diagnóstico, un
+        //  ARMADO por vela mientras durase la memoria del barrido.
+        int  barsSw   = esL ? barsSwBull : barsSwBear
+        int  barBarr  = bar_index - barsSw
+        bool barrNvo  = barsSw == 0
+        bool mismoBar = not na(act) and act.barBarrido == barBarr
+        bool hayBarr  = esL ? sweepBullRecent : sweepBearRecent
+
+        [zi, zd, zp] = f_s6Zona(dir)
+        bool zonaCerca = zi >= 0 and zd <= i_s6Cerca * atr
+
+        if hayBarr and zonaCerca and not mismoBar and (barrNvo or na(act))
+            float mecha = esL ? mechaSwBull : mechaSwBear
+            if not na(mecha)
+                // --- SL saneado (§1.2). Tres pasos, en este orden:
+                //   1. mecha del barrido más el colchón de spread
+                //   2. si queda MÁS CERCA que el mínimo en ATR, se aleja
+                //   3. si queda MÁS LEJOS que el máximo, el filtro SL lo veta
+                //      en el disparo (no aquí: armar y que el contador lo
+                //      registre es más informativo que no armar)
+                float slBase = esL ? mecha - i_s6Spread : mecha + i_s6Spread
+                float dist   = esL ? close - slBase : slBase - close
+                if dist < i_s6SlMin * atr
+                    slBase := esL ? close - i_s6SlMin * atr : close + i_s6SlMin * atr
+                float slR = esL ? math.floor(slBase / f_tickPoints) * f_tickPoints
+                               : math.ceil( slBase / f_tickPoints) * f_tickPoints
+                float t1  = f_nivelObstruccion(esL, close)
+                Zona  zc  = array.get(zones, zi)
+                [sc, det, rr] = f_s6Score(dir, close, slR, t1, zp, zc.mid)
+                s6Seq    += 1
+                s6Armados += 1
+                S6Setup ns = S6Setup.new(uid = s6Seq, dir = dir, sl = slR, tp1 = t1,
+                     score = sc, detalle = det, barArmado = bar_index,
+                     barBarrido = barBarr, contra = bias4h != 0 and bias4h != dir,
+                     sesion = sesIdx, mBloq = 0, mExcl = 0)
+                if esL
+                    s6L := ns
+                else
+                    s6S := ns
+                act := ns
+
+        // --- DISPARO · los cinco filtros, SIN CORTOCIRCUITO (§1.1)
+        //  Se evalúan los cinco SIEMPRE, aunque el primero ya falle. Con
+        //  evaluación perezosa el primero de la cadena se queda todos los
+        //  bloqueos y los demás salen a cero aunque también bloqueasen, que es
+        //  exactamente el error que este modo viene a evitar.
+        if not na(act)
+            float entReal = close
+            float riesgoR = math.abs(entReal - act.sl)
+            float rrReal  = riesgoR > 0 and not na(act.tp1) ?
+                 math.abs(act.tp1 - entReal) / riesgoR : na
+            bool ladoOk = esL ? entReal > act.sl : entReal < act.sl
+
+            int  umbral  = act.contra ? i_s6UmbralC : i_s6Umbral
+            bool okScore = act.score >= umbral
+            bool okRR    = ladoOk and not na(rrReal) and rrReal >= i_s6RrMin
+            bool okChop  = (not i_s6Chop) or (not esChop)
+            bool engulf  = esL ? (close > open and close > high[1]) :
+                 (close < open and close < low[1])
+            float tope   = esL ? topeSwBull : topeSwBear
+            bool rompe   = not na(tope) and (esL ? close > tope : close < tope)
+            bool okConf  = engulf or rompe
+            bool okSL    = riesgoR > 0 and riesgoR <= i_s6SlMax * atr
+
+            int m = 0
+            if not okScore
+                m += S6_SCORE
+            if not okRR
+                m += S6_RR
+            if not okChop
+                m += S6_CHOP
+            if not okConf
+                m += S6_CONF
+            if not okSL
+                m += S6_SL
+
+            if m == 0
+                s6Disparos += 1
+                f_addCand("S6", dir, act.sl, act.tp1,
+                     "S6 barrido confirmado · score " + str.tostring(act.score) +
+                     "/" + str.tostring(umbral) + " · " + act.detalle)
+                if esL
+                    s6L := na
+                else
+                    s6S := na
+            else if i_s6Diag
+                // Se acumula en el setup, no se cuenta aquí: la cuenta se hace
+                // una sola vez, al morir, para que un ARMADO que vive quince
+                // velas no valga por quince bloqueos.
+                for idx = 0 to N_S6F - 1
+                    int bit = f_vetoBit(idx)
+                    if f_vetoTiene(m, bit)
+                        act.mBloq := f_s6Bit(act.mBloq, bit)
+                        if m == bit
+                            act.mExcl := f_s6Bit(act.mExcl, bit)
+                if esL
+                    s6L := act
+                else
+                    s6S := act
 
 // =============================================================================
 //  8 · CONSTRUCCIÓN Y EJECUCIÓN DE LA OPERACIÓN
@@ -3106,6 +3487,8 @@ if setDir != 0 and confBar and not na(atr)
                 opsS3 += 1
             else if setEstr == "S4"
                 opsS4 += 1
+            else if setEstr == "S6"
+                opsS6 += 1
             else
                 opsFvgDia += 1
 
@@ -3627,7 +4010,7 @@ if barstate.islast
 f_biasTxt(int b) => b ==  1 ? "alcista" : b == -1 ? "bajista" : "rango"
 f_biasCol(int b) => b ==  1 ? color.new(color.teal, 0) : b == -1 ? color.new(color.maroon, 0) : color.new(color.gray, 0)
 
-const int N_DIAG = 26
+const int N_DIAG = 30
 var table diag = table.new(position.top_right, 2, N_DIAG, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50))
 
 // Escribe una fila y devuelve la siguiente libre. Si no hay dato, no escribe y
@@ -3730,14 +4113,14 @@ const int N_MIN_MUESTRA = 30
 //  14 grupos: 6 disparadores de FVG/barrido + 4 estrategias nuevas + 3 tiers +
 //  total. S5 no tiene grupo porque es un filtro, no un sistema: no origina
 //  ninguna operación propia.
-const int N_GRUPOS = 14
-const int N_RES = 16
+const int N_GRUPOS = 15
+const int N_RES = 17
 var table res = table.new(position.bottom_right, 7, N_RES, border_width = 1,
      frame_width = 1, frame_color = color.new(color.gray, 40))
 
 if i_verResultados and verExtras and barstate.islast
     array<string> gNom = array.from("FVG5", "FVG1H", "FVG4H", "SWP", "SB", "ASIA",
-         "S1 barrido", "S2 pullback", "S3 fade", "S4 noticias",
+         "S1 barrido", "S2 pullback", "S3 fade", "S4 noticias", "S6 confirmado",
          "FUERTE", "MEDIA", "débil", "TOTAL")
     array<int>   gN   = array.new_int(N_GRUPOS, 0)
     array<int>   gWin = array.new_int(N_GRUPOS, 0)
@@ -3760,9 +4143,9 @@ if i_verResultados and verExtras and barstate.islast
                      o.disparador == "FVG4H" ? 2 : o.disparador == "SWP" ? 3 :
                      o.disparador == "SB" ? 4 : o.disparador == "ASIA" ? 5 :
                      o.disparador == "S1" ? 6 : o.disparador == "S2" ? 7 :
-                     o.disparador == "S3" ? 8 : 9
-                int tiIdx = o.tier == 2 ? 10 : o.tier == 1 ? 11 : 12
-                for gi in array.from(di, tiIdx, 13)
+                     o.disparador == "S3" ? 8 : o.disparador == "S4" ? 9 : 10
+                int tiIdx = o.tier == 2 ? 11 : o.tier == 1 ? 12 : 13
+                for gi in array.from(di, tiIdx, 14)
                     array.set(gN,  gi, array.get(gN, gi) + 1)
                     array.set(gR,  gi, array.get(gR, gi) + rr)
                     if rr > 0
@@ -3944,6 +4327,31 @@ if i_showTable and verExtras and barstate.islast
     if velasDia < i_regMinVel
         regFila := "sin clasificar · " + str.tostring(velasDia) + "/" +
              str.tostring(i_regMinVel) + " velas"
+    //  §1.1 · MODO DIAGNÓSTICO DE S6. Dos cifras por filtro: cuántas veces
+    //  bloqueó, y entre paréntesis cuántas veces fue el ÚNICO que bloqueaba.
+    //  La segunda es la que decide qué relajar: son los disparos que se
+    //  ganarían tocando SOLO ese filtro.
+    //
+    //  Criterio de aceptación 2 del encargo: disparados + bloqueados tiene que
+    //  igualar el total de ARMADO. La fila lo publica para que se compruebe sin
+    //  sumar a mano, y los ARMADO todavía vivos se declaran aparte, porque son
+    //  la diferencia legítima entre las dos cifras.
+    string s6Txt = ""
+    if i_s6On and s6Armados > 0
+        int vivos = (na(s6L) ? 0 : 1) + (na(s6S) ? 0 : 1)
+        s6Txt := str.tostring(s6Armados) + " armados → " + str.tostring(s6Disparos) +
+             " disparos · " + str.tostring(vivos) + " vivos"
+    r := f_filaDiag(r, "S6 armados", s6Txt, chart.fg_color)
+
+    string s6Blo = ""
+    if i_s6On and i_s6Diag
+        for idx = 0 to N_S6F - 1
+            int b6 = array.get(s6Bloq, idx)
+            if b6 > 0
+                s6Blo += (s6Blo == "" ? "" : " · ") + f_s6FiltroNom(idx) + " " +
+                     str.tostring(b6) + " (exc. " + str.tostring(array.get(s6Excl, idx)) + ")"
+    r := f_filaDiag(r, "S6 bloqueos", s6Blo, color.new(color.orange, 0))
+
     //  Conflicto 4 · cuántas veces dos fuentes se contradijeron en la misma
     //  vela. Si este número es alto, las estrategias se están estorbando y el
     //  problema no es el umbral de ninguna.
@@ -3963,8 +4371,8 @@ if i_showTable and verExtras and barstate.islast
     //  es cuando importa.
     string offTxt = ""
     if i_autoOff
-        array<string> famNom = array.from("FVG", "S1", "S2", "S3", "S4")
-        for fi = 0 to 4
+        array<string> famNom = array.from("FVG", "S1", "S2", "S3", "S4", "S6")
+        for fi = 0 to 5
             int nf = array.get(famN, fi)
             if nf >= i_autoOffN and array.get(famR, fi) / nf < 0
                 offTxt += (offTxt == "" ? "" : " · ") + array.get(famNom, fi) +
