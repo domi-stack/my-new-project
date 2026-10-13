@@ -1005,8 +1005,17 @@ string swpNameBear = swpAsiaHi ? "máximo del rango asiático" : swpPdh ? "máxi
 // El barrido del rango asiático tiene id propio para poder medirlo aparte.
 bool esSweepAsia = swpAsiaLo or swpAsiaHi
 
-bool sweepBullRecent = nz(ta.barssince(sweepBull), 999999) <= i_sweepLook
-bool sweepBearRecent = nz(ta.barssince(sweepBear), 999999) <= i_sweepLook
+//  Velas desde el último barrido de cada lado, en ÁMBITO GLOBAL y una sola
+//  vez. ta.barssince lleva estado, así que tiene que evaluarse en cada vela:
+//  dentro de un ternario o detrás de un `and` Pine avisa (CW10002) porque la
+//  llamada puede no ejecutarse, y entonces su historial sale mal sin que nada
+//  falle. Antes había cuatro llamadas, dos de ellas dentro de un ternario en
+//  f_liqPrevia; ahora hay dos y las lee todo el mundo.
+int barsSwBull = nz(ta.barssince(sweepBull), 999999)
+int barsSwBear = nz(ta.barssince(sweepBear), 999999)
+
+bool sweepBullRecent = barsSwBull <= i_sweepLook
+bool sweepBearRecent = barsSwBear <= i_sweepLook
 
 // --- VWAP de sesión con bandas de desviación --------------------------------
 var float cumPV  = 0.0
@@ -1360,8 +1369,7 @@ f_zoneWidth(int prio) =>
 // contrario? Una zona alcista vale más si antes se barrieron mínimos.
 f_liqPrevia(int dir) =>
     int n = i_liqLook
-    dir == 1 ? nz(ta.barssince(sweepBull), 999999) <= n
-             : nz(ta.barssince(sweepBear), 999999) <= n
+    dir == 1 ? barsSwBull <= n : barsSwBear <= n
 
 // Contador de ids en un array de un elemento: una función de Pine no puede
 // asignar a una variable global, pero sí mutar un array.
