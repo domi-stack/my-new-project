@@ -3,8 +3,8 @@
 Documento de contexto para continuar el trabajo en otra conversación. Fecha: 12 de octubre de 2026.
 
 **Fichero**: `pine/MGC_FVG_ORB.pine` · Pine Script v6 · `strategy()` · MGC 5 minutos
-**Tamaño**: 3.995 líneas, 144 inputs
-**Versión**: v2.9 (fichero único: el strategy absorbe el indicador v5)
+**Tamaño**: 4.756 líneas, 170 inputs
+**Versión**: v5.3 (S6, la máquina ARMADO → DISPARO, con modo diagnóstico; fases 1 y 2 aplicadas)
 **Fichero único**: ya no hay un segundo `.pine`. `MGC_v5_indicador.pine` se retiró en la v2.9 al absorber el strategy lo que aportaba; sigue en el historial (`git show 771110d:pine/MGC_v5_indicador.pine`). **La versión `strategy()` del v5 que se pidió en su momento deja de tener sentido: era esto.**
 **Repos**: `domi-stack/crisol` (main) y `domi-stack/my-new-project` (rama `claude/orb-day-trading-bot-es-3bo9db`, PR #1 abierto)
 
@@ -222,6 +222,26 @@ Ocho commits (`62ec8d6` a `26dc416`). **Todas apagadas por defecto.** El documen
 - S5 por defecto **mide** la hipótesis del sesgo horario en los propios datos en vez de aplicarla, con el nuevo acumulador de deriva por hora. El modo «hipótesis fija» existe para contrastar.
 
 **Lo que queda explícitamente sin validar:** las cinco. S1 es una inferencia sobre el espejo del ORB, no un hecho. S2 y S3 son hipótesis **y** solo se pueden medir a medias con datos de spot, porque su VWAP es una aproximación. S4 es hipótesis y además depende de una norma de prop firm sin comprobar.
+
+---
+
+### v5.3 · S6 y el modo diagnóstico (encargo 2)
+
+Diez commits (`a95b551` a `2ab7b68`). El historial completo con motivos está en **`CHANGELOG.md`**; aquí solo lo que un relevo necesita para no romperlo.
+
+**Qué es S6.** La máquina ARMADO → DISPARO del indicador v5.2, que daba cero disparos en cinco días. Entra como séptima fuente, apagada, y la mide la misma tabla por estrategia.
+
+**Lo que de verdad importa recordar:**
+
+1. **El modo diagnóstico evalúa los cinco filtros SIN cortocircuito, y acumula en el setup.** Las dos cosas son deliberadas. Con evaluación perezosa el primer filtro se queda todos los bloqueos; contando por vela en vez de al morir, un ARMADO que vive quince velas valdría por quince bloqueos.
+2. **El SL saneado REDUCE el R:R, no lo aumenta.** Si alguien ve que los R:R bajaron y «lo arregla», habrá vuelto al bug: el 13,6R original venía de un denominador dentro del spread.
+3. **`barBarrido` más `s6UltBarrL/S` son lo que impide los racimos.** Quitar cualquiera de los dos los devuelve.
+4. **La invalidación por SL no es opcional.** Faltaba en mi primer port y es el fallo más serio que encontré al releer: un ARMADO con el SL perforado dispara más tarde en el peor sitio.
+5. **Tres `ta.barssince` han tenido que salir de condicionales** en esta versión (`f_liqPrevia`, el CHoCH de S6, y los del barrido). Es CW10002 y no da error: devuelve historiales equivocados en silencio. **Ningún `ta.*` con estado dentro de un ternario, un `and` o un bloque condicional.**
+
+**El verificador estático creció** a cinco controles: paréntesis, indentación de continuaciones, orden de declaración, funciones que asignan a globales y —nuevo— **identificadores locales usados y nunca declarados**. Ese último cazó tres funciones que había referenciado sin escribir; sin él las habría encontrado TradingView.
+
+**Fase 2 aplicada con los valores del encargo, no medidos.** Los contadores que debían decidirla no existen porque aquí no se ejecuta Pine. Está todo en `CHANGELOG.md` con la columna «fase 1» al lado, así que revertir cualquier relajación es cambiar un número. **La de la tercera vía de confirmación es la de más riesgo**: las otras seis ensanchan un umbral, esa añade una forma nueva de confirmar.
 
 ---
 
