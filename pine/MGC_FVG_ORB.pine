@@ -1262,6 +1262,12 @@ var array<Operacion> ops = array.new<Operacion>()
 // deja el precio apretado contra el borde izquierdo.
 const int X_DER = 5
 
+// Formato de un número CON SIGNO explícito. Hay que escribir las dos secciones,
+// positiva y negativa, separadas por ';'. Con solo "+#.##" Pine añade el '+' que
+// se le pide Y el '-' que lleva el número, y un -6,5 sale como "-+6.5". Es un
+// fallo de presentación que aparecía en las ocho cifras en R del script.
+const string F_SIGNO = "+#.##;-#.##"
+
 // =============================================================================
 //  RÓTULOS · 40 caracteres y prioridad ante colisión (v2.7 §3)
 // =============================================================================
@@ -3180,11 +3186,11 @@ if strategy.closedtrades > nz(strategy.closedtrades[1], 0)
                 float rC = riesgoPlan > 0 ? strategy.closedtrades.profit(ci) / riesgoPlan : na
                 string resTxt = ""
                 if oc.forzado
-                    resTxt := "⌛ cierre forzoso " + str.tostring(rC, "+#.##") + "R"
+                    resTxt := "⌛ cierre forzoso " + str.tostring(rC, F_SIGNO) + "R"
                 else if nz(rC, 0) > 0
-                    resTxt := "✔ TP " + str.tostring(rC, "+#.##") + "R"
+                    resTxt := "✔ TP " + str.tostring(rC, F_SIGNO) + "R"
                 else
-                    resTxt := "✘ SL " + str.tostring(rC, "+#.##") + "R"
+                    resTxt := "✘ SL " + str.tostring(rC, F_SIGNO) + "R"
                 label.set_text(lbR, label.get_text(lbR) + "\n" + resTxt)
                 label.set_color(lbR, nz(rC, 0) > 0 ? color.new(color.green, 20) :
                      color.new(color.maroon, 10))
@@ -3280,7 +3286,7 @@ if strategy.position_size != 0
     float rAct = na(rp) or rp <= 0 ? na : (close - ep) * sg / rp
     float rSl  = na(rp) or rp <= 0 ? na : math.abs(close - pendStop) / rp
     float rTp  = na(rp) or rp <= 0 or na(pendTarget) ? na : math.abs(pendTarget - close) / rp
-    accTxt := "GESTIONAR " + (sg > 0 ? "LARGO" : "CORTO") + " · " + str.tostring(rAct, "+#.##") + "R"
+    accTxt := "GESTIONAR " + (sg > 0 ? "LARGO" : "CORTO") + " · " + str.tostring(rAct, F_SIGNO) + "R"
     accSub := "SL a " + str.tostring(rSl, "#.##") + "R · TP a " + str.tostring(rTp, "#.##") + "R · " +
          str.tostring(minsCierre) + " min al cierre forzoso"
     accCol := color.new(color.blue, 15)
@@ -3686,7 +3692,7 @@ if i_soloAlta and barstate.islast
     // "hoy ya no se opera", y eso pertenece a la fila del día.
     bool frenado = f_frenoActivo()
     rl := f_filaLimpia(rl, "Hoy", str.tostring(tradesToday) + " / " + str.tostring(i_maxTrades) +
-         " · " + str.tostring(rHoy, "+#.##") + "R" + (frenado ? " · FRENO" : ""),
+         " · " + str.tostring(rHoy, F_SIGNO) + "R" + (frenado ? " · FRENO" : ""),
          frenado ? color.new(color.orange, 0) : chart.fg_color)
 
     rl := f_filaLimpia(rl, "Calibración", CAL_TXT, color.new(color.orange, 0))
@@ -3801,7 +3807,7 @@ if i_verResultados and verExtras and barstate.islast
                 float pf = array.get(gNeg, gi) > 0 ? array.get(gPos, gi) / array.get(gNeg, gi) : na
                 table.cell(res, 1, row, str.tostring(n), text_size = size.small, text_color = fg)
                 table.cell(res, 2, row, str.tostring(100.0 * array.get(gWin, gi) / n, "#") + "%", text_size = size.small, text_color = fg)
-                table.cell(res, 3, row, str.tostring(er, "+#.##"), text_size = size.small,
+                table.cell(res, 3, row, str.tostring(er, F_SIGNO), text_size = size.small,
                      text_color = n >= 40 ? (er >= 0.15 ? color.new(color.green, 0) : er <= 0 ? color.new(color.red, 0) : fg) : fg)
                 table.cell(res, 4, row, na(pf) ? "—" : str.tostring(pf, "#.##"), text_size = size.small, text_color = fg)
                 table.cell(res, 5, row, str.tostring(array.get(gDD, gi), "#.##"), text_size = size.small, text_color = fg)
@@ -3962,7 +3968,7 @@ if i_showTable and verExtras and barstate.islast
             int nf = array.get(famN, fi)
             if nf >= i_autoOffN and array.get(famR, fi) / nf < 0
                 offTxt += (offTxt == "" ? "" : " · ") + array.get(famNom, fi) +
-                     " (" + str.tostring(array.get(famR, fi) / nf, "+#.##") + "R, n=" +
+                     " (" + str.tostring(array.get(famR, fi) / nf, F_SIGNO) + "R, n=" +
                      str.tostring(nf) + ")"
     r := f_filaDiag(r, "Apagadas por E[R]<0", offTxt, color.new(color.orange, 0))
 
@@ -3981,7 +3987,7 @@ if i_showTable and verExtras and barstate.islast
         int nH = array.get(horaN, hSlot)
         if nH >= i_s5MinN
             float dH = array.get(horaDrv, hSlot) / nH
-            s5Txt := str.tostring(hSlot) + "h ET: " + str.tostring(dH, "+#.##") +
+            s5Txt := str.tostring(hSlot) + "h ET: " + str.tostring(dH, F_SIGNO) +
                  " pts/hora · n=" + str.tostring(nH) +
                  (i_s5On ? "" : " · S5 apagado")
         else
