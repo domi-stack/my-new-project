@@ -2934,6 +2934,19 @@ var array<int> s6Bloq = array.new_int(N_S6F, 0)
 var array<int> s6Excl = array.new_int(N_S6F, 0)
 var int s6Armados   = 0
 var int s6Disparos  = 0
+//  Criterio 2 del encargo: disparados + resueltos sin disparar + vivos tiene
+//  que igualar el total de ARMADO. Los contadores por filtro NO sirven para esa
+//  suma, porque un setup bloqueado por dos filtros cuenta en los dos. Hace
+//  falta este, que cuenta SETUPS, no bloqueos.
+var int s6Resueltos = 0
+
+//  Última vela de barrido que ya armó, por dirección. Sin esto, un setup que
+//  caduca mientras su barrido sigue estando "reciente" vuelve a armar sobre el
+//  MISMO barrido, que es el racimo otra vez, solo más lento. Con los defectos
+//  no puede pasar (la memoria del barrido es 6 y la caducidad 12), pero sí en
+//  cuanto alguien suba la memoria por encima de la caducidad.
+var int s6UltBarrL = na
+var int s6UltBarrS = na
 
 //  Pone un bit sin operadores a nivel de bit, que Pine no tiene: si ya está, no
 //  se suma otra vez.
@@ -3070,9 +3083,16 @@ if i_s6On and confBar and not na(atr)
         S6Setup  act = esL ? s6L : s6S
 
         // --- Caducidad. Al morir se reparte la culpa (§1.1).
-        if not na(act) and bar_index - act.barArmado > i_s6Inval
+        //  Muere por caducidad O por cierre más allá del SL. Lo segundo lo
+        //  tenía el v5 y faltaba aquí: un ARMADO cuyo SL ya está perforado no es
+        //  un setup esperando confirmación, es un setup equivocado, y dejarlo
+        //  vivo lo que hace es que dispare más tarde en el peor sitio.
+        bool muerePorSl = not na(act) and (esL ? close < act.sl : close > act.sl)
+        bool muerePorT  = not na(act) and bar_index - act.barArmado > i_s6Inval
+        if muerePorSl or muerePorT
             if i_s6Diag
                 f_s6Contar(act)
+            s6Resueltos += 1
             act := na
             if esL
                 s6L := na
@@ -3088,7 +3108,9 @@ if i_s6On and confBar and not na(atr)
         int  barsSw   = esL ? barsSwBull : barsSwBear
         int  barBarr  = bar_index - barsSw
         bool barrNvo  = barsSw == 0
-        bool mismoBar = not na(act) and act.barBarrido == barBarr
+        int  ultBarr  = esL ? s6UltBarrL : s6UltBarrS
+        bool mismoBar = (not na(act) and act.barBarrido == barBarr) or
+             (not na(ultBarr) and ultBarr == barBarr)
         bool hayBarr  = esL ? sweepBullRecent : sweepBearRecent
 
         [zi, zd, zp] = f_s6Zona(dir)
@@ -3138,9 +3160,11 @@ if i_s6On and confBar and not na(atr)
                      barBarrido = barBarr, contra = bias4h != 0 and bias4h != dir,
                      sesion = sesIdx, mBloq = 0, mExcl = 0)
                 if esL
-                    s6L := ns
+                    s6L        := ns
+                    s6UltBarrL := barBarr
                 else
-                    s6S := ns
+                    s6S        := ns
+                    s6UltBarrS := barBarr
                 act := ns
 
         // --- DISPARO · los cinco filtros, SIN CORTOCIRCUITO (§1.1)
@@ -3213,7 +3237,8 @@ if i_s6On and confBar and not na(atr)
                 m += S6_SL
 
             if m == 0
-                s6Disparos += 1
+                s6Disparos  += 1
+                s6Resueltos += 1
                 f_addCandS6(dir, act.sl, act.tp1, scoreDisp,
                      "S6 barrido confirmado · score " + str.tostring(scoreDisp) +
                      "/" + str.tostring(umbral) + " · " + detDisp)
@@ -4642,8 +4667,11 @@ if i_showTable and verExtras and barstate.islast
         if not na(s6S)
             vivoTx += " · S " + str.tostring(s6S.score) + "/" +
                  str.tostring(s6S.contra ? i_s6UmbralC : i_s6Umbral)
+        //  Criterio 2: la cuadratura se publica, no se deja para sumar a mano.
+        bool cuadra = s6Armados == s6Resueltos + vivos
         s6Txt := str.tostring(s6Armados) + " armados → " + str.tostring(s6Disparos) +
-             " disparos · " + str.tostring(vivos) + " vivos" + vivoTx
+             " disparos · " + str.tostring(s6Resueltos - s6Disparos) + " sin disparar · " +
+             str.tostring(vivos) + " vivos" + (cuadra ? " ✔" : " ✘ NO CUADRA") + vivoTx
     //  §1.4 · aviso de temporalidad DENTRO del panel, para que se vea en
     //  cualquier marco. El script está pensado para 5 minutos: el ATR, el techo
     //  de stop y los marcos superiores están calibrados a eso.
