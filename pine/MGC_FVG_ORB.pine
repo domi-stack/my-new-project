@@ -401,6 +401,14 @@ i_showSig   = input.bool(true, "Etiquetas COMPRA / VENTA",      group = G_VIS,
 //  distintas: una dice "a esta hora nunca pasa nada" y la otra "hoy no está
 //  pasando nada". Un día muerto a una hora normalmente buena solo lo caza el
 //  segundo.
+// --- Formato de las alertas (portado del indicador v5) ----------------------
+const string G_ALE = "Alertas"
+i_alertFmt  = input.string("Texto", "Formato del mensaje de alerta",
+     options = ["Texto", "JSON"], group = G_ALE,
+     tooltip = "TEXTO es el de siempre, legible de un vistazo en el móvil.\n\n" +
+               "JSON es el payload del indicador v5, para enviarlo a un webhook que lo parsee. Lleva la estrategia que originó la " +
+               "señal, así que un bot puede dimensionar distinto según la fuente. Los precios ya llevan sumada la base futuros−spot.")
+
 const string G_CHOP = "Filtro de chop"
 i_chopOn    = input.bool(false, "Vetar entradas en volatilidad comprimida", group = G_CHOP,
      tooltip = "APAGADO. Veta si el ATR medio de la sesión en curso está por debajo del percentil elegido de las últimas N sesiones, o " +
@@ -2902,6 +2910,23 @@ if setDir != 0 and confBar and not na(atr)
                      (dOp < d2R ? "ANTES" : "DESPUÉS") + " del 2R (" +
                      str.tostring(dOp, "#.#") + " vs " + str.tostring(d2R, "#.#") + " pts)"
 
+            //  §v2.9 · payload JSON portado del v5. Se construye siempre y se
+            //  elige al final: el coste es una concatenación por señal y a
+            //  cambio el formato es un input y no hay dos rutas de alerta que
+            //  puedan divergir.
+            string msgJson = '{"event":"entrada","symbol":"' + syminfo.ticker +
+                 '","strategy":"' + setEstr + '","trigger":"' + trigId +
+                 '","side":"' + (isLong ? "long" : "short") +
+                 '","entry":' + str.tostring(entry  + i_baseFut, format.mintick) +
+                 ',"sl":'     + str.tostring(stop   + i_baseFut, format.mintick) +
+                 ',"tp":'     + str.tostring(target + i_baseFut, format.mintick) +
+                 ',"qty":'    + str.tostring(qty) +
+                 ',"risk_usd":' + str.tostring(math.round(qty * riskPts * f_pointValue)) +
+                 ',"stop_pts":' + str.tostring(riskPts, "#.##") +
+                 ',"tier":'     + str.tostring(trigTier) +
+                 ',"bias_4h":'  + str.tostring(bias4h) +
+                 ',"regime":"'  + regTxt + '"}'
+
             string msg = (isLong ? "COMPRA" : "VENTA") + " MGC" +
                  " | entrada "  + str.tostring(entry,  format.mintick) +
                  " | stop "     + str.tostring(stop,   format.mintick) +
@@ -2913,8 +2938,9 @@ if setDir != 0 and confBar and not na(atr)
             // El comentario de la orden lleva disparador y tier, para poder
             // reconstruir el resultado por ambos sin trabajo manual.
             string ordCmt = trigId + " t" + str.tostring(trigTier)
+            string msgOut = i_alertFmt == "JSON" ? msgJson : msg
             strategy.entry(trigId, isLong ? strategy.long : strategy.short,
-                 qty = qty, comment = ordCmt, alert_message = msg)
+                 qty = qty, comment = ordCmt, alert_message = msgOut)
             strategy.exit("salida " + trigId, from_entry = trigId, stop = stop, limit = target,
                  comment_loss = "SL " + trigId, comment_profit = "TP " + trigId,
                  alert_message = (isLong ? "Salida largo MGC" : "Salida corto MGC"))
@@ -2997,7 +3023,7 @@ if setDir != 0 and confBar and not na(atr)
                      str.tostring(riskPts, "#.##"),
                      str.tostring(target, format.mintick))
 
-            alert(msg, alert.freq_once_per_bar_close)
+            alert(msgOut, alert.freq_once_per_bar_close)
             // Solo el setup de FVG tiene zona que marcar como disparada; en un
             // barrido `pick` es na.
             if isFvg
