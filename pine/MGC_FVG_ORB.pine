@@ -2,7 +2,7 @@
 // =============================================================================
 //  MGC 12-26 (Micro Gold Futures) · FVG + Estructura de mercado · 5 minutos
 // =============================================================================
-//  Estrategia de varias operaciones diarias (v2.9) sobre zonas de imbalance
+//  Estrategia de varias operaciones diarias (v5.3) sobre zonas de imbalance
 //  (Fair Value Gaps) validadas por estructura de mercado multimarco, más cinco
 //  fuentes de señal adicionales (S1 a S5), TODAS APAGADAS POR DEFECTO.
 //
@@ -14,6 +14,11 @@
 //   · S3 fade de bandas  HIPÓTESIS. Excluyente con S2 por construcción.
 //   · S4 noticias        HIPÓTESIS. Comprobar antes la norma de la prop firm.
 //   · S5 sesgo horario   FILTRO, no sistema. No dispara nunca nada.
+//   · S6 barrido confirm. HIPÓTESIS. Máquina ARMADO -> DISPARO del v5, con el
+//                        SL saneado de la v5.3 y su modo diagnóstico. Es la
+//                        que hay que medir 20 sesiones antes de relajar nada.
+//
+//  CHANGELOG.md lleva cada cambio con su motivo, versión a versión.
 //
 //  Ver docs/ESTRATEGIAS_S1_S5.md: qué está validado, qué es hipótesis, qué
 //  métricas mirar y cuántas operaciones hacen falta para que signifiquen algo.
