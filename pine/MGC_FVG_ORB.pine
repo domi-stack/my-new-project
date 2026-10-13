@@ -2,8 +2,21 @@
 // =============================================================================
 //  MGC 12-26 (Micro Gold Futures) · FVG + Estructura de mercado · 5 minutos
 // =============================================================================
-//  Estrategia de varias operaciones diarias (v2.6) sobre zonas de imbalance
-//  (Fair Value Gaps) validadas por estructura de mercado multimarco.
+//  Estrategia de varias operaciones diarias (v2.8) sobre zonas de imbalance
+//  (Fair Value Gaps) validadas por estructura de mercado multimarco, más cinco
+//  fuentes de señal adicionales (S1 a S5), TODAS APAGADAS POR DEFECTO.
+//
+//  LAS SEIS FUENTES Y SU ESTADO:
+//   · FVG + estructura   el sistema original. Sin calibrar, pero es el que
+//                        define la línea base de regresión.
+//   · S1 barrido         HIPÓTESIS. Espejo del ORB medido; sin comprobar.
+//   · S2 pullback VWAP   HIPÓTESIS. Depende del clasificador de régimen.
+//   · S3 fade de bandas  HIPÓTESIS. Excluyente con S2 por construcción.
+//   · S4 noticias        HIPÓTESIS. Comprobar antes la norma de la prop firm.
+//   · S5 sesgo horario   FILTRO, no sistema. No dispara nunca nada.
+//
+//  Ver docs/ESTRATEGIAS_S1_S5.md: qué está validado, qué es hipótesis, qué
+//  métricas mirar y cuántas operaciones hacen falta para que signifiquen algo.
 //
 //  Opera a cualquier hora y con varias operaciones al día, por decisión del
 //  usuario. Los frenos diarios y el enfriamiento existen pero vienen a 0, o
@@ -49,8 +62,16 @@ strategy(
      calc_on_every_tick      = false,        // solo evalúa al cierre de vela
      process_orders_on_close = true,         // entra al cierre que dispara la señal
      max_boxes_count         = 500,
-     max_labels_count        = 500,   // una señal al día: cabe un backtest largo
-     max_lines_count         = 400)
+     max_labels_count        = 500,
+     max_lines_count         = 400,
+     //  Buffer de histórico explícito (v2.8). Las estrategias nuevas leen
+     //  series con desplazamiento VARIABLE: close[k] en el contador de cierres
+     //  fuera de S1 y vwap[N] en la pendiente de S2, con N de input hasta 60.
+     //  Pine no siempre puede inferir cuánto histórico necesita cuando el
+     //  índice no es constante, y entonces falla en ejecución con "not
+     //  available at the requested index". Declararlo lo evita y no cambia
+     //  ninguna decisión.
+     max_bars_back           = 500)
 
 // =============================================================================
 //  1 · INPUTS
