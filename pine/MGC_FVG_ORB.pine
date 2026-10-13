@@ -437,11 +437,11 @@ const string G_CHOP = "Filtro de chop"
 i_chopOn    = input.bool(false, "Vetar entradas en volatilidad comprimida", group = G_CHOP,
      tooltip = "APAGADO. Veta si el ATR medio de la sesión en curso está por debajo del percentil elegido de las últimas N sesiones, o " +
                "si el precio vive dentro de un rango estrecho comparado con el ATR. En rango comprimido los barridos son ruido.")
-i_chopPct   = input.int(30, "Percentil de ATR por debajo del cual es chop", minval = 5, maxval = 60, group = G_CHOP,
+i_chopPct   = input.int(20, "Percentil de ATR por debajo del cual es chop", minval = 5, maxval = 60, group = G_CHOP,
      tooltip = "Se calcula sobre la cola de 20 sesiones que el script ya mantiene para la fila 'ATR 20 sesiones' del diagnóstico. La " +
                "ventana es fija a propósito: duplicar la cola habría dejado dos sitios con el mismo dato y dos sitios donde " +
                "equivocarse.")
-i_chopRango = input.float(3.0, "…o rango de 20 velas por debajo de (x ATR)", minval = 0.5, maxval = 10.0, step = 0.5, group = G_CHOP,
+i_chopRango = input.float(2.0, "…o rango de 20 velas por debajo de (x ATR)", minval = 0.5, maxval = 10.0, step = 0.5, group = G_CHOP,
      tooltip = "Segunda condición, independiente del percentil: si el rango de las últimas 20 velas cabe en este múltiplo del ATR y el " +
                "precio está dentro de él, es rango activo. Ponlo a 0 para desactivar solo esta mitad.")
 
@@ -574,13 +574,22 @@ const string G_S6 = "S6 · Barrido con confirmación"
 i_s6On      = input.bool(false, "Activar S6 · barrido con confirmación", group = G_S6,
      tooltip = "APAGADA. Es la máquina ARMADO -> DISPARO del indicador v5, con el saneamiento de SL de la v5.3. Se mide en la tabla " +
                "por estrategia igual que S1-S5.")
-i_s6Umbral  = input.int(65, "Score mínimo a favor del sesgo",  minval = 30, maxval = 100, group = G_S6)
+//  FASE 2 · 65 -> 50. Valor PROPUESTO POR EL ENCARGO, no medido: los
+//  contadores que debían decidirlo no existen todavía. El valor de la fase 1
+//  era 65 y está en CHANGELOG.md, así que volver atrás es cambiar un número.
+i_s6Umbral  = input.int(50, "Score mínimo a favor del sesgo",  minval = 30, maxval = 100, group = G_S6,
+     tooltip = "FASE 2: era 65. El ARMADO del diagnóstico tenía 57, así que con 65 no pasaba y con 50 sí. Es la relajación de la que " +
+               "más depende la frecuencia, y por tanto la que más hay que vigilar: si la esperanza se hunde al bajarlo, el problema no " +
+               "era el umbral.")
 i_s6UmbralC = input.int(65, "Score mínimo contra el sesgo",    minval = 30, maxval = 100, group = G_S6,
      tooltip = "Ir contra el sesgo ya cuesta puntos en el propio score, así que este umbral exige además que casi todo lo demás esté a " +
                "favor. Hoy vale lo mismo que el otro: es uno de los candidatos a relajar en la fase 2.")
-i_s6RrMin   = input.float(1.5, "R:R mínimo hasta TP1", minval = 0.5, maxval = 10.0, step = 0.1, group = G_S6)
+i_s6RrMin   = input.float(1.2, "R:R mínimo hasta TP1", minval = 0.5, maxval = 10.0, step = 0.1, group = G_S6,
+     tooltip = "FASE 2: era 1,5. Con el SL saneado los R:R bajan, así que el mismo umbral descarta más que antes. 1,2 compensa eso; no " +
+               "es que 1,2 sea mejor que 1,5, es que 1,2 contra el SL nuevo se parece a 1,5 contra el viejo.")
 i_s6Inval   = input.int(12, "Velas sin disparar hasta invalidar", minval = 2, maxval = 100, group = G_S6)
-i_s6Cerca   = input.float(0.5, "Proximidad exigida a la zona (x ATR)", minval = 0.1, maxval = 3.0, step = 0.1, group = G_S6)
+i_s6Cerca   = input.float(1.0, "Proximidad exigida a la zona (x ATR)", minval = 0.1, maxval = 3.0, step = 0.1, group = G_S6,
+     tooltip = "FASE 2: era 0,5 ATR. Con 0,5 la zona tenía que estar casi tocando el precio en la vela del barrido.")
 i_s6Chop    = input.bool(true, "Usar el filtro de chop en S6", group = G_S6,
      tooltip = "Independiente del veto global de chop: este solo afecta a S6, y es el que el v5 aplicaba al disparo.")
 i_s6SlMin   = input.float(0.8, "SL mínimo (x ATR)", minval = 0.0, maxval = 3.0, step = 0.1, group = G_S6,
@@ -593,16 +602,21 @@ i_s6SlMax   = input.float(2.5, "SL máximo (x ATR)", minval = 0.5, maxval = 10.0
 i_s6Spread  = input.float(0.3, "Colchón de spread (USD/oz)", minval = 0.0, maxval = 5.0, step = 0.05, group = G_S6,
      tooltip = "Se suma al SL en unidades de precio, no en ticks, para que valga igual en MGC que en XAUUSD. Un SL dentro del spread " +
                "no es un SL.")
-i_s6Conf    = input.string("Engulfing o ruptura del barrido", "Qué cuenta como confirmación",
+i_s6Conf    = input.string("+ ruptura de la vela del ARMADO", "Qué cuenta como confirmación",
      options = ["Engulfing o ruptura del barrido", "+ ruptura de la vela del ARMADO"], group = G_S6,
-     tooltip = "DEFECTO = el comportamiento actual del v5. La segunda opción añade una tercera vía de confirmación y es candidata de la " +
-               "fase 2, pero solo si el contador exclusivo de 'sin confirmación' lo justifica.")
-i_s6ChochV  = input.int(0, "Velas de memoria del CHoCH para ir contra el sesgo", minval = 0, maxval = 30, group = G_S6,
-     tooltip = "Con 0 se exige el CHoCH en la VELA EXACTA del ARMADO, que es el comportamiento actual. Subirlo acepta un CHoCH de las " +
-               "últimas N velas. Candidato de la fase 2.")
-i_s6Tp1Resp = input.bool(false, "TP1 de respaldo si no hay nivel opuesto", group = G_S6,
-     tooltip = "APAGADO = comportamiento actual: sin nivel opuesto no hay TP1, no hay R:R y no hay disparo. Al encenderlo, TP1 pasa a " +
-               "entrada ± X R y la etiqueta lo declara como 'TP1 fijo', para no confundir un objetivo medido con uno inventado.")
+     tooltip = "FASE 2: se añade la tercera vía, cierre más allá del extremo de la vela del ARMADO. La primera opción es el " +
+               "comportamiento de la fase 1.\n\n" +
+               "AVISO: esta es la relajación con más riesgo de las siete. Las otras seis ensanchan un umbral; esta añade una FORMA " +
+               "NUEVA de confirmar, y una confirmación más laxa no es lo mismo que un umbral más bajo. Si la esperanza se hunde, mira " +
+               "esta primero.")
+i_s6ChochV  = input.int(6, "Velas de memoria del CHoCH para ir contra el sesgo", minval = 0, maxval = 30, group = G_S6,
+     tooltip = "FASE 2: era 0, o sea el CHoCH en la vela EXACTA del ARMADO, que es casi imposible de cumplir. 6 es la misma memoria que " +
+               "el barrido, que es lo que pedía el encargo. Con 0 vuelve el comportamiento de la fase 1.")
+i_s6Tp1Resp = input.bool(true, "TP1 de respaldo si no hay nivel opuesto", group = G_S6,
+     tooltip = "FASE 2: encendido. Sin él, sin nivel opuesto no hay TP1, no hay R:R y no hay disparo, y eso se comía setups válidos por " +
+               "falta de un objetivo medible. Con él, TP1 pasa a entrada ± X R y la etiqueta lo declara 'TP1 2R fijo'.\n\n" +
+               "Ese rótulo importa: un objetivo inventado y uno medido no se pueden mezclar en la misma estadística sin saber cuál es " +
+               "cuál, y el registro los distingue.")
 i_s6Tp1R    = input.float(2.0, "R del TP1 de respaldo", minval = 0.5, maxval = 10.0, step = 0.1, group = G_S6)
 i_s6Diag    = input.bool(true, "Modo diagnóstico de S6", group = G_S6,
      tooltip = "Cuenta, por cada ARMADO que caduca o se invalida, QUÉ filtros impidieron el disparo. Dos cifras por filtro: cuántas " +
@@ -3118,7 +3132,8 @@ if i_s6On and confBar and not na(atr)
                 s6Seq    += 1
                 s6Armados += 1
                 S6Setup ns = S6Setup.new(uid = s6Seq, dir = dir, sl = slR, tp1 = t1,
-                     score = sc, detalle = det + (t1Fijo ? " · TP1 fijo" : ""),
+                     score = sc,
+                     detalle = det + (t1Fijo ? " · TP1 " + str.tostring(i_s6Tp1R, "#.#") + "R fijo" : ""),
                      barArmado = bar_index,
                      barBarrido = barBarr, contra = bias4h != 0 and bias4h != dir,
                      sesion = sesIdx, mBloq = 0, mExcl = 0)
@@ -3140,8 +3155,35 @@ if i_s6On and confBar and not na(atr)
                  math.abs(act.tp1 - entReal) / riesgoR : na
             bool ladoOk = esL ? entReal > act.sl : entReal < act.sl
 
+            //  FASE 2 · RECÁLCULO DEL SCORE EN LA VELA DE CONFIRMACIÓN.
+            //  El score del ARMADO describía la vela del BARRIDO, no la del
+            //  disparo, y entre las dos pueden pasar hasta i_s6Inval velas. Dos
+            //  de sus componentes son propiedades de la vela gatillo
+            //  —desplazamiento y volumen— y congelarlos medía la vela
+            //  equivocada. El de R:R, además, se mide ahora contra la entrada
+            //  REAL, que es el cierre de esta vela.
+            //
+            //  f_s6Score lee close, open y volume del bar en curso, así que
+            //  llamarla aquí ya da lo que hace falta sin tocar la función ni
+            //  sus pesos: la misma fórmula, otra vela.
+            //
+            //  Si la zona murió entre el ARMADO y el disparo no hay con qué
+            //  recalcular su parte, y se conserva el score del ARMADO en vez de
+            //  inventarse uno peor: perder el setup por un dato que ya no
+            //  existe sería castigarlo dos veces.
+            int    scoreDisp = act.score
+            string detDisp   = act.detalle
+            [zi2, zd2, zp2] = f_s6Zona(dir)
+            if zi2 >= 0
+                Zona zc2 = array.get(zones, zi2)
+                [sc2, det2, rr2] = f_s6Score(dir, entReal, act.sl, act.tp1, zp2, zc2.mid)
+                scoreDisp := sc2
+                detDisp   := det2 + (str.contains(act.detalle, "fijo") ? " · TP1 fijo" : "")
+            act.score   := scoreDisp
+            act.detalle := detDisp
+
             int  umbral  = act.contra ? i_s6UmbralC : i_s6Umbral
-            bool okScore = act.score >= umbral
+            bool okScore = scoreDisp >= umbral
             bool okRR    = ladoOk and not na(rrReal) and rrReal >= i_s6RrMin
             bool okChop  = (not i_s6Chop) or (not esChop)
             bool engulf  = esL ? (close > open and close > high[1]) :
@@ -3172,9 +3214,9 @@ if i_s6On and confBar and not na(atr)
 
             if m == 0
                 s6Disparos += 1
-                f_addCandS6(dir, act.sl, act.tp1, act.score,
-                     "S6 barrido confirmado · score " + str.tostring(act.score) +
-                     "/" + str.tostring(umbral) + " · " + act.detalle)
+                f_addCandS6(dir, act.sl, act.tp1, scoreDisp,
+                     "S6 barrido confirmado · score " + str.tostring(scoreDisp) +
+                     "/" + str.tostring(umbral) + " · " + detDisp)
                 if esL
                     s6L := na
                 else
@@ -4593,8 +4635,15 @@ if i_showTable and verExtras and barstate.islast
     string s6Txt = ""
     if i_s6On and s6Armados > 0
         int vivos = (na(s6L) ? 0 : 1) + (na(s6S) ? 0 : 1)
+        string vivoTx = ""
+        if not na(s6L)
+            vivoTx += " · L " + str.tostring(s6L.score) + "/" +
+                 str.tostring(s6L.contra ? i_s6UmbralC : i_s6Umbral)
+        if not na(s6S)
+            vivoTx += " · S " + str.tostring(s6S.score) + "/" +
+                 str.tostring(s6S.contra ? i_s6UmbralC : i_s6Umbral)
         s6Txt := str.tostring(s6Armados) + " armados → " + str.tostring(s6Disparos) +
-             " disparos · " + str.tostring(vivos) + " vivos"
+             " disparos · " + str.tostring(vivos) + " vivos" + vivoTx
     //  §1.4 · aviso de temporalidad DENTRO del panel, para que se vea en
     //  cualquier marco. El script está pensado para 5 minutos: el ATR, el techo
     //  de stop y los marcos superiores están calibrados a eso.
