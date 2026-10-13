@@ -371,6 +371,11 @@ i_verRangos   = input.bool(true, "Dibujar rangos Asia / Londres", group = G_VIS)
 i_verEtiqLvl  = input.bool(true, "Etiquetar niveles al borde derecho", group = G_VIS)
 i_showVwap  = input.bool(true, "Dibujar VWAP y bandas",         group = G_VIS)
 i_showTable = input.bool(true, "Mostrar tabla de diagnóstico",  group = G_VIS)
+i_verResHist = input.bool(true, "Escribir el resultado en la etiqueta al cerrar", group = G_VIS,
+     tooltip = "Portado del indicador v5, y aquí es mejor que allí: en el indicador el resultado era simulado contra TP1 y SL, y aquí " +
+               "es el PnL REAL de la operación cerrada, con su comisión y su slippage dentro.\n\n" +
+               "El gráfico queda como registro de lo que el script dijo y en qué acabó, que es lo que permite juzgarlo sin fiarse de " +
+               "una tabla. Es dibujo: no mueve la lista de operaciones.")
 i_marcas3   = input.bool(true, "Marcadores de tres niveles (punto · rombo · flecha)", group = G_VIS,
      tooltip = "Portado del indicador v5. Sale de la misma capa de acción que la etiqueta y la tabla, así que las tres dicen siempre " +
                "lo mismo. Punto gris para VIGILAR, rombo ámbar para PREPARAR o ESPERAR CONFIRMACIÓN, flecha para EJECUTAR.\n\n" +
@@ -2662,6 +2667,11 @@ var float  pendTarget = na
 // Etiquetas de señal con cola FIFO propia, para que el recolector de Pine no se
 // lleve por delante los pools creados al principio del gráfico.
 var array<label> lblSenales = array.new<label>()
+//  Etiqueta de CADA operación, alineada índice a índice con `ops`. Hace falta
+//  una cola propia porque lblSenales solo recibe la etiqueta si i_showSig está
+//  encendido, y entonces sus índices no cuadrarían con los de `ops`. Guarda na
+//  cuando no se dibujó etiqueta.
+var array<label> lblOps = array.new<label>()
 
 // Líneas de entrada, stop y objetivo de cada operación, con su propia cola.
 var array<line> lnOps  = array.new<line>()
@@ -2939,8 +2949,12 @@ if setDir != 0 and confBar and not na(atr)
                  str.tostring(qty) + "c · " +
                  str.tostring(math.round(qty * riskPts * f_pointValue)) + " $"
 
+            //  La etiqueta se guarda en una variable para poder apuntarla
+            //  también en lblOps, que es la cola alineada con `ops`: al cerrar
+            //  la operación se le escribe el resultado encima.
+            label lbSig = na
             if i_showSig
-                array.push(lblSenales, label.new(
+                lbSig := label.new(
                      x         = bar_index,
                      y         = isLong ? low - atr * 0.7 : high + atr * 0.7,
                      text      = txtSig,
@@ -2948,7 +2962,8 @@ if setDir != 0 and confBar and not na(atr)
                      textcolor = color.white,
                      style     = isLong ? label.style_label_up : label.style_label_down,
                      size      = size.normal,
-                     tooltip   = msg))
+                     tooltip   = msg)
+                array.push(lblSenales, lbSig)
                 while array.size(lblSenales) > 200
                     label.delete(array.shift(lblSenales))
 
@@ -2966,6 +2981,11 @@ if setDir != 0 and confBar and not na(atr)
                     line.delete(array.shift(lnOps))
                 lnVivas := true
                 lnBar   := bar_index
+
+            //  SIEMPRE se empuja, con etiqueta o con na, para que el índice de
+            //  lblOps sea el mismo que el de `ops` y el mismo que el del
+            //  Strategy Tester.
+            array.push(lblOps, lbSig)
 
             // Registro D: disparo de entrada. Solo escribe.
             if enRangoLog
@@ -3062,6 +3082,30 @@ if strategy.closedtrades > nz(strategy.closedtrades[1], 0)
         // Contadores del freno y del enfriamiento.
         if strategy.closedtrades.profit(ci) < 0
             perdHoy += 1
+        // --- Resultado escrito en la etiqueta de la señal (v2.9) ------------
+        //  Portado del indicador v5, y aquí es MEJOR que allí: en el indicador
+        //  el resultado era simulado contra TP1 y SL; aquí es el PnL real de la
+        //  operación cerrada, con su comisión y su slippage dentro.
+        //
+        //  Solo se escribe si la etiqueta sigue viva: la cola de 200 borra las
+        //  más antiguas, y escribir en una etiqueta borrada es un error. Se
+        //  comprueba por referencia con array.includes, que es exacto, en vez
+        //  de estimar por índice.
+        if i_verResHist and ci < array.size(lblOps)
+            label lbR = array.get(lblOps, ci)
+            if not na(lbR) and array.includes(lblSenales, lbR)
+                float rC = riesgoPlan > 0 ? strategy.closedtrades.profit(ci) / riesgoPlan : na
+                string resTxt = ""
+                if oc.forzado
+                    resTxt := "⌛ cierre forzoso " + str.tostring(rC, "+#.##") + "R"
+                else if nz(rC, 0) > 0
+                    resTxt := "✔ TP " + str.tostring(rC, "+#.##") + "R"
+                else
+                    resTxt := "✘ SL " + str.tostring(rC, "+#.##") + "R"
+                label.set_text(lbR, label.get_text(lbR) + "\n" + resTxt)
+                label.set_color(lbR, nz(rC, 0) > 0 ? color.new(color.green, 20) :
+                     color.new(color.maroon, 10))
+
         // --- Registro O: una línea por operación cerrada (v2.8) -------------
         //  El "exportable a CSV" de la tabla por estrategia. Solo escribe: no
         //  entra en ninguna decisión, igual que el exportador de zonas.
