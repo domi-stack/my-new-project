@@ -3,9 +3,9 @@
 Documento de contexto para continuar el trabajo en otra conversación. Fecha: 12 de octubre de 2026.
 
 **Fichero**: `pine/MGC_FVG_ORB.pine` · Pine Script v6 · `strategy()` · MGC 5 minutos
-**Tamaño**: 3.754 líneas, 136 inputs
-**Versión**: v2.8 (cinco fuentes de señal nuevas, S1 a S5, todas apagadas)
-**Segundo fichero**: `pine/MGC_v5_indicador.pine` · v5.2 · 1.295 líneas, 31 inputs · `indicator()` · 24 h, puerta de calidad única. **Falta su versión `strategy()`**, que estaba pedida en el mismo encargo.
+**Tamaño**: 3.995 líneas, 144 inputs
+**Versión**: v2.9 (fichero único: el strategy absorbe el indicador v5)
+**Fichero único**: ya no hay un segundo `.pine`. `MGC_v5_indicador.pine` se retiró en la v2.9 al absorber el strategy lo que aportaba; sigue en el historial (`git show 771110d:pine/MGC_v5_indicador.pine`). **La versión `strategy()` del v5 que se pidió en su momento deja de tener sentido: era esto.**
 **Repos**: `domi-stack/crisol` (main) y `domi-stack/my-new-project` (rama `claude/orb-day-trading-bot-es-3bo9db`, PR #1 abierto)
 
 Documentos de especificación que se han seguido, en orden de precedencia creciente:

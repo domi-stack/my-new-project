@@ -1,6 +1,38 @@
-# Las cinco estrategias nuevas · S1 a S5 (v2.8)
+# Las cinco estrategias nuevas · S1 a S5 (v2.8) y la consolidación (v2.9)
 
-Fichero: `pine/MGC_FVG_ORB.pine`. **Un único Pine**: no hay una versión «indicador» de esto.
+Fichero: `pine/MGC_FVG_ORB.pine`. **Es el único `.pine` del proyecto.**
+
+## La consolidación de la v2.9
+
+Un `strategy()` y un `indicator()` no pueden ser el mismo script: Pine admite una sola declaración. Así que «un solo Pine con todo» significaba necesariamente que el strategy se quedara con todo y el indicador desapareciera. Eso es lo que hace la v2.9.
+
+**Lo que se trajo del indicador v5.2** (commits `v2.9-1` a `v2.9-5`):
+
+| Qué | Dónde | Estado |
+|---|---|---|
+| Filtro de chop por percentil de ATR | Grupo `Filtro de chop`, bit `V_CHOP` de la máscara | Apagado |
+| Marcadores de tres niveles · punto, rombo, flecha | Grupo `Visual` | Encendido (es dibujo) |
+| Resultado escrito en la etiqueta al cerrar | Grupo `Visual` | Encendido (es dibujo) |
+| Payload JSON de alerta | Grupo `Alertas` | Formato `Texto` por defecto |
+| Desactivación por esperanza negativa | Grupo `Reparto de cupo` | Apagado |
+
+Dos de ellas **funcionan mejor aquí que en el indicador**, y no por casualidad: en el indicador el resultado de un disparo era *simulado* contra TP1 y SL, mientras que aquí es el PnL real de una operación cerrada, con su comisión y su slippage dentro. Eso afecta a la anotación de la etiqueta y a la desactivación automática.
+
+**Lo que NO se trajo, y por qué.** Esto importa más que la lista anterior, porque es donde un merge a lo bruto habría estropeado el script:
+
+- **El score 0-100 del v5 y su reparto de pesos.** El strategy ya tiene su propio score de zona con otros pesos. Traer el del v5 significaría tener dos puntuaciones compitiendo, o elegir una. **Elegir una es una decisión de trading, no de refactor**, y no es mía: dímelo y la hago.
+- **El sesgo de cinco votos y la alineación 4H/1H/15m del score.** Mismo caso: el strategy ya calcula `bias5`, `bias1h` y `bias4h` y ya tiene un término de alineación con el marco mayor, solo ponderado distinto.
+- **Zonas de FVG en 15m.** No hace falta portar nada: el input `Marco intermedio` admite `15`. Cada `request.security` es un recurso limitado (6 de 40 usados) y habría sido gastar uno para algo que ya se puede pedir.
+- **El panel único del v5.** El strategy ya tiene dos tablas (diagnóstico y modo limpio). Una tercera sería ruido, que es justo lo que la v2.7 vino a quitar.
+- **El modo Minimal.** El modo limpio (`Operar solo zonas ALTA`) ya hace eso.
+- **El gatillo de 1 minuto.** Explicado en §2: desde un gráfico de 5m no se puede ver la secuencia de velas de 1m.
+- **La cola de setups abiertos (`abiertos`).** En un `strategy()` con `pyramiding = 0` solo hay una posición a la vez, y `ops` más el Strategy Tester ya llevan la cuenta.
+
+El fichero retirado sigue en el historial de git: `git show 771110d:pine/MGC_v5_indicador.pine` lo recupera entero.
+
+---
+
+**Todo lo que sigue describe las cinco estrategias de la v2.8.**
 
 **Todas apagadas por defecto.** Con la configuración de fábrica el script hace exactamente lo que hacía en la v2.7, y eso no es una promesa: es una propiedad del código, explicada en §7.
 
