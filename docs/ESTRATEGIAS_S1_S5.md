@@ -174,6 +174,12 @@ Los contadores se incrementan **cuando la orden ya está puesta**, no al generar
 
 El conflicto **incluye al candidato heredado**: si el FVG compra y S3 vende, el desacuerdo es el mismo que entre dos estrategias nuevas. Se cuentan las veces que ocurre y sale en la fila `Conflictos de dirección` de la tabla: **si ese número es alto, las estrategias se están estorbando y el problema no es el umbral de ninguna.**
 
+### 7.4b · Una interacción que conviene conocer
+
+Si una estrategia nueva **gana la prioridad** a un FVG que disparaba en la misma vela, el FVG no se opera —correcto— y su zona **no** se marca como disparada. Pero la máquina de estados ya la habrá marcado **consumida**, porque el precio perforó su 50 %, y eso ocurre con independencia de que se operase o no: es comportamiento del sistema original, no algo que rompa la capa nueva.
+
+Consecuencia práctica: con `Estrategias nuevas primero` o con el reparto rotatorio, **cada vez que una estrategia nueva se adelanta a un FVG, esa zona se pierde sin haberse operado**. No es un error, es el precio de cambiar la prioridad, y es una razón más para dejar `FVG primero` mientras no haya medición.
+
 ### 7.5 · La garantía de regresión
 
 No he podido exportar la lista del Strategy Tester antes y después: en este entorno no hay TradingView. Lo que sí puedo dar es un argumento más fuerte que una comparación, porque es estructural:
