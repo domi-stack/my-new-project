@@ -65,8 +65,14 @@ strategy(
      default_qty_type        = strategy.fixed,
      default_qty_value       = 1,
      commission_type         = strategy.commission.cash_per_order,
-     commission_value        = 1.0,          // 1 USD por orden = 2 USD round turn
-     slippage                = 1,            // 1 tick = 0,10 puntos = 1 USD
+     //  §1.6 · comisión y slippage como inputs, con los valores de siempre como
+     //  defecto: 1 USD por orden son 2 USD round turn, y 1 tick de MGC son 0,10
+     //  puntos. Se declaran aquí porque strategy() admite inputs, y así cambiar
+     //  de bróker no obliga a editar el código.
+     commission_value        = input.float(1.0, "Comisión por orden (USD)", minval = 0.0, step = 0.1,
+          group = "Costes", tooltip = "1,0 son 2 USD round turn, que es lo que pedía la especificación."),
+     slippage                = input.int(1, "Slippage (ticks)", minval = 0, maxval = 20,
+          group = "Costes", tooltip = "1 tick de MGC son 0,10 puntos, o 1 USD por contrato."),
      calc_on_every_tick      = false,        // solo evalúa al cierre de vela
      process_orders_on_close = true,         // entra al cierre que dispara la señal
      max_boxes_count         = 500,
@@ -334,6 +340,11 @@ i_logOps    = input.bool(false, "Exportar operaciones cerradas a Pine Logs", gro
 // --- Medición (v2 §5) --------------------------------------------------------
 const string G_MED = "Medición"
 i_verResultados = input.bool(true, "Mostrar tabla de resultados", group = G_MED)
+i_verRegistro   = input.bool(true, "Mostrar registro de los últimos disparos", group = G_MED,
+     tooltip = "Los últimos diez disparos operación a operación, con su resultado en R y la estadística desglosada por sesión y por a " +
+               "favor o contra el sesgo. La tabla de resultados agrega; esta no, y es la que permite mirar una operación concreta y " +
+               "decir que no debería haber salido.\n\n" +
+               "Comparte esquina con la de resultados, así que si te estorban apaga una.")
 i_fechaDiag = input.time(timestamp("2000-01-01T00:00:00"), "Fecha de inicio del diagnóstico", group = G_MED,
      tooltip = "Las dos tablas cuentan solo desde esta fecha, para poder separar la muestra de desarrollo de la de validación. " +
                "Por defecto cuenta todo.")
@@ -1123,6 +1134,7 @@ bool enSB   = not na(time(timeframe.period, i_sesSB,   "America/New_York"))
 //  usaba todavía, y su horario (08:00-17:00 ET) no es ajustable en las otras.
 bool   enNY   = not na(time(timeframe.period, "0800-1700", "America/New_York"))
 int    sesIdx = enNY ? 2 : enLon ? 1 : enAsia ? 0 : 3
+f_sesNom(int s) => s == 2 ? "NY" : s == 1 ? "Lon" : s == 0 ? "Asia" : "—"
 string sesTxt = sesIdx == 2 ? "NY" : sesIdx == 1 ? "Londres" : sesIdx == 0 ? "Asia" : "—"
 
 // Acumulación de la sesión en curso.
@@ -1332,6 +1344,13 @@ type Operacion
     int    entryBar
     int    entryTime    // para respetar la fecha de inicio del diagnóstico
     bool   forzado      // cerrada por cierre forzoso u horizonte
+    // --- v5.3 §1.5 · para la estadística desglosada del registro
+    int    sesion       // 0 Asia · 1 Londres · 2 NY · 3 fuera
+    bool   contra       // se abrió contra el sesgo de 4H
+    float  entrada      // precio de entrada, para la tabla de registro
+    float  slPrecio
+    float  tpPrecio
+    int    score        // score de la fuente en el momento de la entrada
 
 var array<Operacion> ops = array.new<Operacion>()
 
@@ -2418,6 +2437,13 @@ f_addCand(string estr, int dir, float stop, float tgt, string motivo) =>
     array.push(cands, Cand.new(estr = estr, dir = dir, stop = stop, tgt = tgt,
          score = math.max(0, math.min(100, sc)), motivo = motivo))
 
+//  S6 trae su propia puntuación 0-100 en vez de la neutra de 50, así que entra
+//  por su propia puerta. No pasa por el modificador de S5 porque el encargo de
+//  S5 es explícito: inclina S1 y S2 y nada más.
+f_addCandS6(int dir, float stop, float tgt, int sc, string motivo) =>
+    array.push(cands, Cand.new(estr = "S6", dir = dir, stop = stop, tgt = tgt,
+         score = math.max(0, math.min(100, sc)), motivo = motivo))
+
 //  Un candidato por debajo del mínimo de puntuación se descarta. Con el mínimo
 //  a 0 no descarta nada, que es el defecto.
 f_candVale(Cand c) => c.score >= i_s5MinScr
@@ -3074,7 +3100,7 @@ if i_s6On and confBar and not na(atr)
 
             if m == 0
                 s6Disparos += 1
-                f_addCand("S6", dir, act.sl, act.tp1,
+                f_addCandS6(dir, act.sl, act.tp1, act.score,
                      "S6 barrido confirmado · score " + str.tostring(act.score) +
                      "/" + str.tostring(umbral) + " · " + act.detalle)
                 if esL
@@ -3164,6 +3190,9 @@ string setEstr = "FVG"
 float  setStop = na    // stop propio del candidato nuevo; na = lo pone §8
 float  setTgt  = na    // objetivo propio; na = el objetivo estándar en USD
 string setMot  = ""
+//  Puntuación de la fuente que gane, para el registro. Las de S1-S5 la llevan
+//  en el candidato; S6 trae la de su propio score. 0 si no aplica.
+int    setScore = 0
 
 //  Conflicto 4 · direcciones presentes entre las fuentes ELEGIBLES, contando
 //  también el candidato heredado: si el FVG compra y S3 vende, el desacuerdo es
@@ -3207,9 +3236,10 @@ if not (conflicto and i_conflicto == "No operar ninguna")
                     setDir  := c.dir
                     setKind := "Estrategia"
                     setEstr := c.estr
-                    setStop := c.stop
-                    setTgt  := c.tgt
-                    setMot  := c.motivo
+                    setStop  := c.stop
+                    setTgt   := c.tgt
+                    setMot   := c.motivo
+                    setScore := c.score
 
 if setDir != 0 and confBar and not na(atr)
     bool  isLong = setDir == 1
@@ -3386,7 +3416,11 @@ if setDir != 0 and confBar and not na(atr)
             array.push(ops, Operacion.new(estrategia = setEstr, disparador = trigId,
                  tier = trigTier,
                  riesgoUSD = qty * riskPts * f_pointValue, stopPts = riskPts,
-                 entryBar = bar_index, entryTime = time, forzado = false))
+                 entryBar = bar_index, entryTime = time, forzado = false,
+                 sesion = sesIdx,
+                 contra = bias4h != 0 and bias4h != setDir,
+                 entrada = entry, slPrecio = stop, tpPrecio = target,
+                 score = isFvg ? pick.score : setScore))
 
             // Etiqueta en el gráfico: COMPRA en verde debajo, VENTA en rojo
             // encima. El detalle completo va en el tooltip para no ensuciar.
@@ -3577,6 +3611,21 @@ if strategy.closedtrades > nz(strategy.closedtrades[1], 0)
                 label.set_text(lbR, label.get_text(lbR) + "\n" + resTxt)
                 label.set_color(lbR, nz(rC, 0) > 0 ? color.new(color.green, 20) :
                      color.new(color.maroon, 10))
+
+        // --- Alerta de RESULTADO al cerrar (v5.3 §1.5) ----------------------
+        //  Tercer evento, después de "entrada". Cierra el ciclo para quien
+        //  recoja las alertas en un webhook: sin él, el receptor sabe lo que se
+        //  abrió pero nunca en qué acabó.
+        if i_alertFmt == "JSON"
+            float rA = riesgoPlan > 0 ? strategy.closedtrades.profit(ci) / riesgoPlan : na
+            string outc = oc.forzado ? "caducado" : nz(rA, 0) > 0 ? "TP" : "SL"
+            alert('{"event":"resultado","symbol":"' + syminfo.ticker +
+                 '","strategy":"' + oc.estrategia + '","trigger":"' + oc.disparador +
+                 '","outcome":"' + outc +
+                 '","r":' + (na(rA) ? "null" : str.tostring(rA, "#.###")) +
+                 ',"pnl_usd":' + str.tostring(strategy.closedtrades.profit(ci), "#.##") +
+                 ',"session":"' + f_sesNom(oc.sesion) + '"}',
+                 alert.freq_once_per_bar_close)
 
         // --- Registro O: una línea por operación cerrada (v2.8) -------------
         //  El "exportable a CSV" de la tabla por estrategia. Solo escribe: no
@@ -4087,6 +4136,132 @@ if i_soloAlta and barstate.islast
     if rl <= N_LIMPIA - 1
         table.clear(limpia, 0, rl, 1, N_LIMPIA - 1)
 
+
+// =============================================================================
+//  10d · REGISTRO DE DISPAROS (v5.3 §1.5)
+// =============================================================================
+//  Los últimos N disparos con su resultado, y debajo la estadística. Existe
+//  porque la tabla de resultados agrega y esta NO: aquí se ve operación a
+//  operación, que es lo que permite mirar una y decir "esta no debería haber
+//  salido". Comparte esquina con la de resultados; las dos son conmutables.
+//
+//  CRITERIO 7 DEL ENCARGO: la esperanza en R se publica DESDE EL PRIMER DÍA,
+//  marcada como provisional hasta las 100 operaciones. No es un aprobado ni un
+//  suspenso: con 20 sesiones no se concluye nada. Está para que el número
+//  exista y no se olvide mirarlo.
+const int N_REG_FILAS = 10
+const int N_REG = N_REG_FILAS + 8
+var table reg = table.new(position.bottom_right, 8, N_REG, border_width = 1,
+     frame_width = 1, frame_color = color.new(color.gray, 40))
+
+//  Marca de muestra insuficiente para CUALQUIER desglose. 40 es el umbral del
+//  encargo: por debajo, la cifra se da pero en gris y con la n al lado.
+f_regCifra(int n, float v, string fmt) =>
+    n == 0 ? "—" : str.tostring(v, fmt) + (n < 40 ? "  n=" + str.tostring(n) : "")
+
+f_regCol(int n) => n >= 40 ? chart.fg_color : color.new(color.gray, 35)
+
+if i_verRegistro and verExtras and barstate.islast
+    table.cell(reg, 0, 0, "Registro", text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
+    array<string> regCab = array.from("hora", "dir", "entrada", "SL", "TP", "score", "sesión")
+    for k = 0 to 6
+        table.cell(reg, k + 1, 0, array.get(regCab, k), text_color = color.white,
+             bgcolor = color.new(color.blue, 30), text_size = size.small)
+
+    //  Los N últimos, del más reciente hacia atrás.
+    int total = array.size(ops)
+    int fila  = 0
+    if total > 0
+        for k = total - 1 to math.max(0, total - N_REG_FILAS)
+            if fila < N_REG_FILAS
+                fila += 1
+                Operacion o = array.get(ops, k)
+                //  Resultado: si la operación ya cerró hay R; si no, "abierto".
+                string resTx = "abierto"
+                color  resCo = color.new(color.blue, 0)
+                if k < strategy.closedtrades and o.riesgoUSD > 0
+                    float rk = strategy.closedtrades.profit(k) / o.riesgoUSD
+                    resTx := str.tostring(rk, F_SIGNO) + "R"
+                    resCo := rk > 0 ? color.new(color.green, 0) : color.new(color.red, 0)
+                table.cell(reg, 0, fila, str.format_time(o.entryTime, "dd-MM HH:mm", tz),
+                     text_size = size.tiny)
+                table.cell(reg, 1, fila, o.estrategia + "·" + o.disparador, text_size = size.tiny)
+                table.cell(reg, 2, fila, str.tostring(o.entrada,  format.mintick), text_size = size.tiny)
+                table.cell(reg, 3, fila, str.tostring(o.slPrecio, format.mintick), text_size = size.tiny)
+                table.cell(reg, 4, fila, str.tostring(o.tpPrecio, format.mintick), text_size = size.tiny)
+                table.cell(reg, 5, fila, o.score > 0 ? str.tostring(o.score) : "—", text_size = size.tiny)
+                table.cell(reg, 6, fila, sesIdx == o.sesion ? "·" + f_sesNom(o.sesion) : f_sesNom(o.sesion),
+                     text_size = size.tiny)
+                table.cell(reg, 7, fila, resTx, text_color = resCo, text_size = size.tiny)
+
+    //  --- Estadística. Global, por sesión y a favor / contra el sesgo.
+    int   nT = 0
+    int   wT = 0
+    float rT = 0.0
+    float posT = 0.0
+    float negT = 0.0
+    array<int>   nS = array.new_int(4, 0)
+    array<float> rS = array.new_float(4, 0.0)
+    array<int>   nB = array.new_int(2, 0)
+    array<float> rB = array.new_float(2, 0.0)
+    for k = 0 to strategy.closedtrades - 1
+        if k < array.size(ops)
+            Operacion o = array.get(ops, k)
+            if o.riesgoUSD > 0 and o.entryTime >= i_fechaDiag
+                float rk = strategy.closedtrades.profit(k) / o.riesgoUSD
+                nT += 1
+                rT += rk
+                if rk > 0
+                    wT += 1
+                    posT += rk
+                else
+                    negT -= rk
+                int si = math.max(0, math.min(3, o.sesion))
+                array.set(nS, si, array.get(nS, si) + 1)
+                array.set(rS, si, array.get(rS, si) + rk)
+                int bi = o.contra ? 1 : 0
+                array.set(nB, bi, array.get(nB, bi) + 1)
+                array.set(rB, bi, array.get(rB, bi) + rk)
+
+    int f0 = fila + 1
+    table.cell(reg, 0, f0, "n / acierto", text_size = size.tiny, text_color = color.new(color.gray, 20))
+    table.cell(reg, 1, f0, nT == 0 ? "—" : str.tostring(nT) + " · " +
+         str.tostring(100.0 * wT / nT, "#") + "%", text_size = size.tiny, text_color = f_regCol(nT))
+    table.cell(reg, 2, f0, "E[R]", text_size = size.tiny, text_color = color.new(color.gray, 20))
+    table.cell(reg, 3, f0, f_regCifra(nT, nT == 0 ? na : rT / nT, F_SIGNO),
+         text_size = size.tiny, text_color = f_regCol(nT))
+    table.cell(reg, 4, f0, "PF", text_size = size.tiny, text_color = color.new(color.gray, 20))
+    table.cell(reg, 5, f0, negT > 0 ? str.tostring(posT / negT, "#.##") : "—",
+         text_size = size.tiny, text_color = f_regCol(nT))
+    //  Criterio 7: el número existe desde el primer día, con su advertencia.
+    table.cell(reg, 6, f0, nT >= 100 ? "" : "PROVISIONAL", text_size = size.tiny,
+         text_color = color.new(color.orange, 0))
+    table.cell(reg, 7, f0, nT >= 100 ? "" : "n<100", text_size = size.tiny,
+         text_color = color.new(color.orange, 0))
+
+    table.cell(reg, 0, f0 + 1, "E[R] por sesión", text_size = size.tiny, text_color = color.new(color.gray, 20))
+    for si = 0 to 2
+        table.cell(reg, si * 2 + 1, f0 + 1, f_sesNom(si), text_size = size.tiny,
+             text_color = color.new(color.gray, 20))
+        table.cell(reg, si * 2 + 2, f0 + 1,
+             f_regCifra(array.get(nS, si), array.get(nS, si) == 0 ? na :
+             array.get(rS, si) / array.get(nS, si), F_SIGNO),
+             text_size = size.tiny, text_color = f_regCol(array.get(nS, si)))
+
+    table.cell(reg, 0, f0 + 2, "E[R] por sesgo", text_size = size.tiny, text_color = color.new(color.gray, 20))
+    table.cell(reg, 1, f0 + 2, "a favor", text_size = size.tiny, text_color = color.new(color.gray, 20))
+    table.cell(reg, 2, f0 + 2, f_regCifra(array.get(nB, 0), array.get(nB, 0) == 0 ? na :
+         array.get(rB, 0) / array.get(nB, 0), F_SIGNO),
+         text_size = size.tiny, text_color = f_regCol(array.get(nB, 0)))
+    table.cell(reg, 3, f0 + 2, "contra", text_size = size.tiny, text_color = color.new(color.gray, 20))
+    table.cell(reg, 4, f0 + 2, f_regCifra(array.get(nB, 1), array.get(nB, 1) == 0 ? na :
+         array.get(rB, 1) / array.get(nB, 1), F_SIGNO),
+         text_size = size.tiny, text_color = f_regCol(array.get(nB, 1)))
+    table.cell(reg, 5, f0 + 2, "n<40 con su n al lado: no concluyente",
+         text_size = size.tiny, text_color = color.new(color.gray, 30))
+
+    if f0 + 3 <= N_REG - 1
+        table.clear(reg, 0, f0 + 3, 7, N_REG - 1)
 
 // =============================================================================
 //  10c · TABLA DE RESULTADOS por disparador y por tier (v2 §5.1)
