@@ -6,6 +6,21 @@ Convención: ⚠️ marca lo que **mueve la lista de operaciones** del Strategy 
 
 ---
 
+## Encargo 3 · S7 order block y S8 OTE
+
+Las dos **apagadas**, así que con los defectos de la v5.4 la lista de operaciones no se mueve. Documento: `docs/ESTRATEGIAS_S1_S8.md` (renombrado desde `_S1_S5`).
+
+| Cambio | Motivo |
+|---|---|
+| **S7 · order block** | La última vela contraria antes de un desplazamiento que rompe estructura. Dos pasos, y el primero es un **inventario**, no un setup: al romper se archiva el rango de esa vela; al volver el precio se emite el candidato |
+| **S7 · cede ante el FVG cuando solapan** | Un OB y el FVG del mismo desplazamiento señalan el mismo precio **y en la misma dirección**, así que el contador de conflictos no los vería: ese cuenta desacuerdos, y aquí hay **acuerdo duplicado** — dos fuentes cobrándose la misma señal e inflando la muestra de las dos. Con más del 50 % de solape, S7 no emite, y hay fila propia en el diagnóstico |
+| **El 50 % se mide contra la zona menor** | Es lo que responde a «¿señalan el mismo sitio?». Un FVG diminuto dentro de un OB grande solapa el 100 % de sí mismo; medirlo contra el OB habría dejado pasar justo ese caso |
+| **S8 · OTE** | El aviso va en el código **y** en el tooltip, literal: el bloque 70,5-79 % es una convención de una comunidad, no un resultado medido. Los dos porcentajes son **inputs** precisamente por eso |
+| **DXY instrumentado, no promovido** | `Operacion.dxyAlEntrar` capturado **al entrar** —recalcularlo al cerrar mediría otra cosa— y fila de esperanza por dirección del dólar. `i_verDxy` pasa a `true` porque con él apagado `dxyDir` vale 0 siempre y la fila no podría medir nada. Sigue sin entrar en ninguna decisión |
+| **ORB · medido y descartado, por escrito** | 133 sesiones: esperanza −0,028R, PF 0,84, win rate 51,1 % contra 53,1 % de equilibrio. Quince variantes, ninguna sobre +0,10R. La única marginal se explica por una muestra en la que el oro cayó 16,3 %. Queda en `docs/ESTRATEGIAS_S1_S8.md` para que nadie lo reintroduzca por tener la idea otra vez |
+
+---
+
 ## v5.4 · Tres incoherencias, y las seis fuentes encendidas
 
 ### Las tres correcciones
@@ -131,7 +146,7 @@ Absorbe del indicador v5.2 lo que aportaba y **retira el segundo fichero**. Un `
 
 ## v2.8 · Cinco fuentes de señal nuevas (S1 a S5)
 
-Todas apagadas. Documento propio: `docs/ESTRATEGIAS_S1_S5.md`. Encargo archivado en `docs/ENCARGO_S1_S5.md`.
+Todas apagadas. Documento propio: `docs/ESTRATEGIAS_S1_S8.md`. Encargo archivado en `docs/ENCARGO_S1_S5.md`.
 
 | Cambio | Motivo |
 |---|---|

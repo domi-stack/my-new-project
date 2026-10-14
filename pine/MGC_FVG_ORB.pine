@@ -35,14 +35,14 @@
 //
 //  CHANGELOG.md lleva cada cambio con su motivo, versión a versión.
 //
-//  Ver docs/ESTRATEGIAS_S1_S5.md: qué está validado, qué es hipótesis, qué
+//  Ver docs/ESTRATEGIAS_S1_S8.md: qué está validado, qué es hipótesis, qué
 //  métricas mirar y cuántas operaciones hacen falta para que signifiquen algo.
 //
 //  FICHERO ÚNICO (v2.9). Este es el único .pine del proyecto. El indicador
 //  MGC_v5_indicador.pine se retiró al absorber aquí lo que aportaba: filtro de
 //  chop por percentil de ATR, marcadores de tres niveles, resultado escrito en
 //  la etiqueta al cerrar, payload JSON de alerta y desactivación por esperanza
-//  negativa. Lo que NO se trajo, y por qué, está en docs/ESTRATEGIAS_S1_S5.md.
+//  negativa. Lo que NO se trajo, y por qué, está en docs/ESTRATEGIAS_S1_S8.md.
 //  Un strategy() y un indicator() no pueden ser el mismo script, así que "todo
 //  en uno" significaba necesariamente que el strategy se quedara con todo.
 //

@@ -1,6 +1,73 @@
-# Las cinco estrategias nuevas · S1 a S5 (v2.8) y la consolidación (v2.9)
+# Las fuentes de señal añadidas · S1 a S8
 
 Fichero: `pine/MGC_FVG_ORB.pine`. **Es el único `.pine` del proyecto.**
+
+## S7 · Order block (encargo 3)
+
+La última vela contraria antes de un desplazamiento que rompe estructura. Dos pasos, y el primero **no es un setup sino un inventario**: cuando hay ruptura se busca hacia atrás la última vela contraria y se archiva su rango; después, al volver el precio, se emite el candidato.
+
+| Input | Defecto | Para qué |
+|---|---|---|
+| Velas máximas entre el OB y la ruptura | 5 | Si la ruptura llega diez velas después, esa vela ya no es «la última antes del desplazamiento» |
+| Desplazamiento mínimo | 1,0 ATR | Sin un mínimo, cualquier ruptura marginal deja un OB detrás |
+| Altura mínima / máxima de la vela | 0,3 / 1,5 ATR | Por debajo es ruido; por encima el stop no cabe en el techo de puntos |
+| Solo OB nunca mitigados | sí | Un OB al que el precio ya volvió ha gastado lo que tuviera dentro |
+| R fijo del objetivo | 2,0 | |
+
+**No repinta** porque la detección mira solo hacia atrás y la zona se fija en la vela de la ruptura.
+
+### El solape con el FVG, y por qué el contador de conflictos no servía
+
+Un OB y el FVG del mismo desplazamiento señalan casi siempre el mismo precio **y van en la misma dirección**. El contador de conflictos no los vería nunca: ese cuenta *desacuerdos*, y aquí hay **acuerdo duplicado**, que es un problema distinto — dos fuentes cobrándose la misma señal e inflando la muestra de las dos.
+
+Si un FVG vivo solapa **más del 50 %** con el OB candidato, S7 no emite, y se cuenta en la fila `S7 descartados por solape`. Manda el FVG porque su nivel de entrada, el 50 %, es más preciso que «dentro de la banda».
+
+**Cómo se mide ese 50 %, que es la parte no obvia:** contra la zona **menor** de las dos. Es lo que responde a «¿están señalando el mismo sitio?». Un FVG diminuto dentro de un OB grande solapa el 100 % de sí mismo y ahí manda el FVG; medirlo contra el OB habría dejado pasar justo ese caso.
+
+---
+
+## S8 · OTE · Optimal Trade Entry (encargo 3)
+
+> **Esta es la hipótesis más débil de las ocho.**
+>
+> «El bloque 70,5-79 % no tiene ninguna evidencia publicada que lo distinga de cualquier otro porcentaje de retroceso. Es una convención de una comunidad, no un resultado medido. Se implementa para poder **medirlo** contra las otras fuentes en la tabla de grupos, no porque se sepa que funciona. Si tras 40 operaciones su esperanza no supera a la del FVG, no hay motivo para mantenerlo.»
+
+Retroceso al bloque 70,5-79 % del último tramo impulsivo, tomado de `swHigh`/`swLow`. **Los dos porcentajes son inputs**, y esa es la consecuencia práctica del párrafo de arriba: poder moverlos es lo único que permite comprobar si ese bloque tiene algo que otro no tenga.
+
+El tramo sale de pivotes **ya confirmados**, con su retardo inherente. Eso es a la vez la razón de que no repinte y de que el tramo se conozca algo tarde: son la misma cosa, y no se puede tener una sin la otra.
+
+Stop más allá del **origen** del tramo, que es lo que invalida la lectura: si el precio vuelve ahí, el tramo no era impulsivo. Objetivo R fijo a 2,0 o el extremo del tramo, configurable. Caducidad de 24 velas, porque un retroceso que llega tres horas después no es el mismo contexto.
+
+---
+
+## Lo que NO se añadió, y la evidencia que lo impide
+
+Esto está aquí para que nadie lo reintroduzca por tener la idea otra vez.
+
+### ORB · ruptura del rango de apertura · MEDIDO Y DESCARTADO
+
+Sobre **133 sesiones** de XAUUSD 5m:
+
+| Métrica | Valor |
+|---|---|
+| Esperanza | **−0,028R** |
+| Profit factor | **0,84** |
+| Win rate | 51,1 % |
+| Win rate de equilibrio | 53,1 % |
+
+Quince variantes probadas (objetivo de 1,0× a 3,0×, con y sin filtro direccional) y **ninguna** supera el umbral de +0,10R. La única marginal —SELL, +0,080R— se explica por la tendencia del periodo: el oro cayó un **16,3 %** en la muestra, así que un sistema que solo vende en una muestra bajista gana por el sesgo de la muestra, no por la señal.
+
+**No se reintroduce.** Y nótese el detalle que importa: el win rate está *por debajo* del de equilibrio. No es que falte ajuste de objetivo; es que la señal no tiene dirección.
+
+S1 es el **espejo** de esto, y por eso es una hipótesis razonable — pero sigue sin estar medida, y el espejo de una estrategia perdedora no es automáticamente ganadora: entre las dos se quedan la comisión, el slippage y todas las veces en que la ruptura no falla.
+
+### DXY como filtro · instrumentado, no promovido
+
+Está en el script como contexto de solo lectura, y desde el encargo 3 también como **medición**: `Operacion.dxyAlEntrar` se captura al entrar y el registro publica la esperanza desglosada por dirección del dólar.
+
+**Promoverlo a filtro exige 40 operaciones en cada grupo y que la diferencia sea real.** Hasta entonces es una fila de tabla, no una regla.
+
+---
 
 ## La consolidación de la v2.9
 

@@ -200,7 +200,7 @@ Tres decisiones que conviene no revertir por descuido:
 
 ### v2.8 · Cinco fuentes de señal nuevas (S1 a S5)
 
-Ocho commits (`62ec8d6` a `26dc416`). **Todas apagadas por defecto.** El documento propio es `docs/ESTRATEGIAS_S1_S5.md`; aquí va solo lo que un relevo necesita saber para no romperlo.
+Ocho commits (`62ec8d6` a `26dc416`). **Todas apagadas por defecto.** El documento propio es `docs/ESTRATEGIAS_S1_S8.md`; aquí va solo lo que un relevo necesita saber para no romperlo.
 
 **La arquitectura, que es la decisión importante.** Las cinco estrategias **no reimplementan la ejecución**. Cada una deja un `Cand` en una lista y un resolutor elige uno, que entra por el mismo embudo de siempre: máscara de vetos, dimensionamiento, redondeo a ticks y `strategy.entry`. Tres consecuencias:
 

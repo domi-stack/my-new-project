@@ -2,7 +2,7 @@
 
 > **Nota de procedencia, añadida al archivar el encargo.** Todo lo que sigue a la línea divisoria es el texto del encargo tal como se recibió, sin editar. Se archiva porque era la única de las especificaciones seguidas que vivía solo en el chat, y porque las decisiones que delegaba («propón uno medible», «implementa la que argumentes mejor», «define qué pasa si…») solo se pueden auditar con el enunciado delante.
 >
-> **Estado: implementado.** Commits `v2.8-1` a `v2.8-9` sobre `pine/MGC_FVG_ORB.pine`. La respuesta punto por punto —qué se decidió, qué se delegó, qué quedó sin validar y qué no se pudo comprobar— está en **`docs/ESTRATEGIAS_S1_S5.md`**.
+> **Estado: implementado.** Commits `v2.8-1` a `v2.8-9` sobre `pine/MGC_FVG_ORB.pine`. La respuesta punto por punto —qué se decidió, qué se delegó, qué quedó sin validar y qué no se pudo comprobar— está en **`docs/ESTRATEGIAS_S1_S8.md`**.
 >
 > **Las tres preguntas que el encargo invitaba a hacer, y sus respuestas:**
 >
@@ -12,7 +12,7 @@
 > | ¿Qué cuenta como «pendiente definida» del VWAP en S2? | Variación en N velas contra ATR: `(VWAP − VWAP[N]) / ATR` |
 > | Pine no puede escribir ficheros: ¿cómo se materializa el «exportable a CSV»? | Pine Logs, una línea por operación cerrada |
 >
-> **Un requisito que no se pudo cumplir y conviene que quede escrito:** «Exporta la lista antes y después y compárala». El entorno donde se escribió el código no ejecuta Pine, así que esa comparación **no se hizo**. En su lugar se da un argumento estructural de por qué la lista no puede cambiar con los defectos (§7.5 de `ESTRATEGIAS_S1_S5.md`). La comparación sigue pendiente y es del usuario.
+> **Un requisito que no se pudo cumplir y conviene que quede escrito:** «Exporta la lista antes y después y compárala». El entorno donde se escribió el código no ejecuta Pine, así que esa comparación **no se hizo**. En su lugar se da un argumento estructural de por qué la lista no puede cambiar con los defectos (§7.5 de `ESTRATEGIAS_S1_S8.md`). La comparación sigue pendiente y es del usuario.
 
 ---
 
