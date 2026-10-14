@@ -3268,6 +3268,18 @@ if i_s6On and confBar and not na(atr)
 //  8 · CONSTRUCCIÓN Y EJECUCIÓN DE LA OPERACIÓN
 // =============================================================================
 
+//  §2 de la v5.4 · ¿se ENVIÓ realmente la orden en esta vela? La capa de
+//  acción pintaba "EJECUTAR" cuando el RESOLUTOR daba dirección, o sea ANTES de
+//  evaluar la máscara de vetos, que se comprueba después dentro de `if mask ==
+//  0`. Resultado: flechas grandes de EJECUTAR en velas sin ninguna entrada, y
+//  con el límite diario alcanzado, decenas de flechas y cero operaciones.
+//
+//  Estas dos variables son el puente. `opEjecutada` se pone a true en el único
+//  sitio donde se manda la orden; `setMask` lleva el motivo cuando no se manda,
+//  para poder nombrarlo en vez de dejar un genérico.
+bool opEjecutada = false
+int  setMask     = 0
+
 var float  pendStop   = na
 var float  pendTarget = na
 // Etiquetas de señal con cola FIFO propia, para que el recolector de Pine no se
@@ -3446,6 +3458,7 @@ if setDir != 0 and confBar and not na(atr)
     //  pasa 100 para que ese bit nunca se active por su culpa.
     int zScore = isFvg ? pick.score : 100
     int mask   = f_mascara(setDir, entry, stop, isFvg, zScore)
+    setMask   := mask
     nSetups   += 1
     f_contarVetos(mask)
 
@@ -3547,6 +3560,9 @@ if setDir != 0 and confBar and not na(atr)
             string msgOut = i_alertFmt == "JSON" ? msgJson : msg
             strategy.entry(trigId, isLong ? strategy.long : strategy.short,
                  qty = qty, comment = ordCmt, alert_message = msgOut)
+            //  AQUÍ, y en ningún otro sitio: es la única línea que garantiza
+            //  que la operación existe.
+            opEjecutada := true
             strategy.exit("salida " + trigId, from_entry = trigId, stop = stop, limit = target,
                  comment_loss = "SL " + trigId, comment_profit = "TP " + trigId,
                  alert_message = (isLong ? "Salida largo MGC" : "Salida corto MGC"))
@@ -3864,11 +3880,24 @@ if strategy.position_size != 0
     accSub := "SL a " + str.tostring(rSl, "#.##") + "R · TP a " + str.tostring(rTp, "#.##") + "R · " +
          str.tostring(minsCierre) + " min al cierre forzoso"
     accCol := color.new(color.blue, 15)
-else if setDir != 0
+else if opEjecutada
     accTxt := "EJECUTAR " + (setDir == 1 ? "COMPRA" : "VENTA")
     accDir := setDir
-    accSub := "disparo en esta vela"
+    accSub := "orden enviada en esta vela"
     accCol := setDir == 1 ? color.new(color.green, 0) : color.new(color.red, 0)
+else if setDir != 0
+    //  Hubo candidato y la máscara lo vetó. Antes esto caía en la rama de
+    //  arriba y pintaba una flecha de ejecución que no se correspondía con
+    //  ninguna operación. Ahora tiene estado propio y nombra los vetos, igual
+    //  que hace la rama de ESPERAR CONFIRMACIÓN.
+    accTxt := "SEÑAL VETADA " + (setDir == 1 ? "COMPRA" : "VENTA")
+    accDir := setDir
+    accCol := color.new(color.fuchsia, 0)
+    string vsv = ""
+    for idx = 0 to N_VETOS - 1
+        if f_vetoTiene(setMask, f_vetoBit(idx))
+            vsv += (vsv == "" ? "" : " + ") + f_vetoName(idx)
+    accSub := "Veto: " + (vsv == "" ? "—" : vsv)
 else if not hayCand
     accTxt := "NO OPERAR · sin zona MEDIA o FUERTE en el radio"
     accCol := color.new(color.gray, 25)
@@ -4096,6 +4125,10 @@ bool mkVig = verMarcas and str.startswith(accTxt, "VIGILAR")
 bool mkPrep = verMarcas and (str.startswith(accTxt, "PREPARAR") or
      str.startswith(accTxt, "ESPERAR"))
 bool mkEjec = verMarcas and str.startswith(accTxt, "EJECUTAR")
+//  Marcador propio de la señal vetada: una x PEQUEÑA. No un triángulo, para
+//  que verla sea posible pero no se pueda confundir con una ejecución, que es
+//  exactamente el error que había.
+bool mkVeto = verMarcas and str.startswith(accTxt, "SEÑAL VETADA")
 
 plotshape(mkVig and accDir ==  1, "Vigilar compra", shape.circle, location.belowbar,
      color.new(color.green, 55), size = size.tiny)
@@ -4109,6 +4142,10 @@ plotshape(mkEjec and accDir ==  1, "Ejecutar compra", shape.triangleup, location
      color.new(color.green, 0), size = size.normal)
 plotshape(mkEjec and accDir == -1, "Ejecutar venta",  shape.triangledown, location.abovebar,
      color.new(color.red,   0), size = size.normal)
+plotshape(mkVeto and accDir ==  1, "Señal vetada compra", shape.xcross, location.belowbar,
+     color.new(color.fuchsia, 20), size = size.tiny)
+plotshape(mkVeto and accDir == -1, "Señal vetada venta",  shape.xcross, location.abovebar,
+     color.new(color.fuchsia, 20), size = size.tiny)
 
 // Fondo de la ventana Silver Bullet, en un tono distinto y más tenue que el de
 // la ventana de operativa. Dos fondos superpuestos es el límite de lo legible.
