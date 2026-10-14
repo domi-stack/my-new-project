@@ -336,7 +336,7 @@ i_vetoAdr   = input.bool(false, "Veto por ADR agotado", group = G_FLT,
      tooltip = "Si el rango ya recorrido hoy supera este porcentaje del ADR(20), no se entra: la idea es que el movimiento del día ya está " +
                "hecho. Entra en la máscara de vetos con su bit y sus contadores.")
 i_pctAdr    = input.float(100.0, "% de ADR para el veto", minval = 10, maxval = 300, step = 5, group = G_FLT)
-i_verDxy    = input.bool(false, "Fila de contexto DXY", group = G_FLT,
+i_verDxy    = input.bool(true, "Fila de contexto DXY", group = G_FLT,
      tooltip = "Solo lectura: dirección del dólar en 1H respecto a su EMA 20. NO entra en ninguna decisión. Si la medición muestra que los " +
                "largos con DXY bajista baten claramente a los largos con DXY alcista, entonces se valorará como filtro.")
 
@@ -1476,6 +1476,10 @@ type Operacion
     // --- v5.3 §1.5 · para la estadística desglosada del registro
     int    sesion       // 0 Asia · 1 Londres · 2 NY · 3 fuera
     bool   contra       // se abrió contra el sesgo de 4H
+    //  Dirección del DXY AL ENTRAR, capturada aquí y no recalculada después.
+    //  SOLO INSTRUMENTACIÓN: no entra en ninguna decisión. Promoverlo a filtro
+    //  exige medir antes, y esto es lo que lo hace medible.
+    int    dxyAlEntrar
     float  entrada      // precio de entrada, para la tabla de registro
     float  slPrecio
     float  tpPrecio
@@ -3858,6 +3862,7 @@ if setDir != 0 and confBar and not na(atr)
                  entryBar = bar_index, entryTime = time, forzado = false,
                  sesion = sesIdx,
                  contra = bias4h != 0 and bias4h != setDir,
+                 dxyAlEntrar = dxyDir,
                  entrada = entry, slPrecio = stop, tpPrecio = target,
                  score = isFvg ? pick.score : setScore))
 
@@ -4624,7 +4629,7 @@ if i_soloAlta and barstate.islast
 //  suspenso: con 20 sesiones no se concluye nada. Está para que el número
 //  exista y no se olvide mirarlo.
 const int N_REG_FILAS = 10
-const int N_REG = N_REG_FILAS + 8
+const int N_REG = N_REG_FILAS + 9
 var table reg = table.new(position.bottom_right, 8, N_REG, border_width = 1,
      frame_width = 1, frame_color = color.new(color.gray, 40),
      bgcolor = color.new(chart.bg_color, 12))
@@ -4723,6 +4728,32 @@ if i_verRegistro and verExtras and barstate.islast
              array.get(rS, si) / array.get(nS, si), F_SIGNO),
              text_size = size.tiny, text_color = f_regCol(array.get(nS, si)))
 
+    //  §Encargo 3 · esperanza desglosada por dirección del DXY al entrar. Es
+    //  SOLO instrumentación: la condición para promoverlo a filtro es tener 40
+    //  operaciones en cada grupo y que la diferencia sea real, y esta fila es
+    //  lo que permite comprobarlo en vez de suponerlo.
+    array<int>   nD = array.new_int(3, 0)
+    array<float> rD = array.new_float(3, 0.0)
+    for k = 0 to strategy.closedtrades - 1
+        if k < array.size(ops)
+            Operacion od = array.get(ops, k)
+            if od.riesgoUSD > 0 and od.entryTime >= i_fechaDiag
+                int di2 = od.dxyAlEntrar == 1 ? 0 : od.dxyAlEntrar == -1 ? 1 : 2
+                array.set(nD, di2, array.get(nD, di2) + 1)
+                array.set(rD, di2, array.get(rD, di2) +
+                     strategy.closedtrades.profit(k) / od.riesgoUSD)
+    table.cell(reg, 0, f0 + 3, "E[R] por DXY", text_size = size.tiny, text_color = color.new(color.gray, 20))
+    array<string> dxyNom = array.from("DXY ↑", "DXY ↓", "plano")
+    for di2 = 0 to 2
+        table.cell(reg, di2 * 2 + 1, f0 + 3, array.get(dxyNom, di2), text_size = size.tiny,
+             text_color = color.new(color.gray, 20))
+        table.cell(reg, di2 * 2 + 2, f0 + 3,
+             f_regCifra(array.get(nD, di2), array.get(nD, di2) == 0 ? na :
+             array.get(rD, di2) / array.get(nD, di2), F_SIGNO),
+             text_size = size.tiny, text_color = f_regCol(array.get(nD, di2)))
+    table.cell(reg, 7, f0 + 3, i_verDxy ? "solo medición" : "DXY apagado",
+         text_size = size.tiny, text_color = color.new(color.gray, 30))
+
     table.cell(reg, 0, f0 + 2, "E[R] por sesgo", text_size = size.tiny, text_color = color.new(color.gray, 20))
     table.cell(reg, 1, f0 + 2, "a favor", text_size = size.tiny, text_color = color.new(color.gray, 20))
     table.cell(reg, 2, f0 + 2, f_regCifra(array.get(nB, 0), array.get(nB, 0) == 0 ? na :
@@ -4735,8 +4766,8 @@ if i_verRegistro and verExtras and barstate.islast
     table.cell(reg, 5, f0 + 2, "n<40 con su n al lado: no concluyente",
          text_size = size.tiny, text_color = color.new(color.gray, 30))
 
-    if f0 + 3 <= N_REG - 1
-        table.clear(reg, 0, f0 + 3, 7, N_REG - 1)
+    if f0 + 4 <= N_REG - 1
+        table.clear(reg, 0, f0 + 4, 7, N_REG - 1)
 
 // =============================================================================
 //  10c · TABLA DE RESULTADOS por disparador y por tier (v2 §5.1)
