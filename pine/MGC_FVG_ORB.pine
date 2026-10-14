@@ -159,8 +159,11 @@ i_sessMadrid  = input.session("1530-1900", "Ventana (hora de Madrid)", group = G
 i_sessNY      = input.session("0930-1300", "Ventana (hora de NY)",     group = G_SES)
 i_closeMadrid = input.int(21, "Hora de cierre forzoso (Madrid)", minval = 0, maxval = 23, group = G_SES)
 i_closeNY     = input.int(15, "Hora de cierre forzoso (NY)",     minval = 0, maxval = 23, group = G_SES)
-i_maxTrades   = input.int(3,  "Máximo de operaciones al día",    minval = 1, maxval = 10, group = G_SES,
-     tooltip = "Cuenta por día de trading, que en modo 24 h empieza a las 18:00 ET. Ponlo en 1 para reproducir la línea base de regresión.")
+i_maxTrades   = input.int(3,  "Máximo de operaciones al día (0 = sin límite)", minval = 0, maxval = 50, group = G_SES,
+     tooltip = "0 DESACTIVA el límite, igual que en los frenos y el enfriamiento: era el único que no seguía esa convención y por tanto " +
+               "el único freno que no se podía apagar.\n\n" +
+               "Cuenta por día de trading, que en modo 24 h empieza a las 18:00 ET. Ponlo en 1 para reproducir la línea base de " +
+               "regresión; el defecto de 3 es la decisión de la v2.6.")
 
 // --- Fair Value Gaps ---------------------------------------------------------
 const string G_FVG = "Fair Value Gaps"
@@ -2370,7 +2373,7 @@ f_mascara(int dir, float entrada, float stop, bool esFvg, int zScore) =>
         m += V_VENTANA
     // El freno diario comparte bit con el límite diario: las dos cosas son
     // "hoy ya no se opera más", así que no hace falta un bit nuevo.
-    if tradesToday >= i_maxTrades or f_frenoActivo()
+    if (i_maxTrades > 0 and tradesToday >= i_maxTrades) or f_frenoActivo()
         m += V_DIARIO
     // El enfriamiento comparte bit con la posición abierta: las dos son "ahora
     // mismo no, espera".
@@ -3870,7 +3873,11 @@ else if not hayCand
     accTxt := "NO OPERAR · sin zona MEDIA o FUERTE en el radio"
     accCol := color.new(color.gray, 25)
 else if f_vetoTiene(candMask, V_DIARIO)
-    accTxt := "NO OPERAR · límite diario alcanzado"
+    //  V_DIARIO lo comparten el límite y los frenos. Con el límite a 0 la única
+    //  forma de que ese bit se active es un freno, y decir "límite diario
+    //  alcanzado" entonces sería falso.
+    accTxt := "NO OPERAR · " +
+         (f_frenoActivo() ? "freno diario activo" : "límite diario alcanzado")
     accCol := color.new(color.gray, 25)
 else if f_vetoTiene(candMask, V_VENTANA)
     accTxt := "NO OPERAR · fuera de ventana"
@@ -4267,7 +4274,8 @@ if i_soloAlta and barstate.islast
     // El freno aparece aquí y no en una fila propia: lo que necesitas saber es
     // "hoy ya no se opera", y eso pertenece a la fila del día.
     bool frenado = f_frenoActivo()
-    rl := f_filaLimpia(rl, "Hoy", str.tostring(tradesToday) + " / " + str.tostring(i_maxTrades) +
+    rl := f_filaLimpia(rl, "Hoy", str.tostring(tradesToday) + " / " +
+         (i_maxTrades > 0 ? str.tostring(i_maxTrades) : "sin límite") +
          " · " + str.tostring(rHoy, F_SIGNO) + "R" + (frenado ? " · FRENO" : ""),
          frenado ? color.new(color.orange, 0) : chart.fg_color)
 
@@ -4567,7 +4575,8 @@ if i_showTable and verExtras and barstate.islast
          na(atr) ? "" : str.tostring(atr, "#.##") + " pts", chart.fg_color)
 
     r := f_filaDiag(r, "Operaciones hoy",
-         str.tostring(tradesToday) + " / " + str.tostring(i_maxTrades), chart.fg_color)
+         str.tostring(tradesToday) + " / " +
+         (i_maxTrades > 0 ? str.tostring(i_maxTrades) : "sin límite"), chart.fg_color)
     r := f_filaDiag(r, "Ventana", winTxt, winCol)
     r := f_filaDiag(r, "Zonas activas",
          str.tostring(nAct) + " de " + str.tostring(array.size(zones)), chart.fg_color)
