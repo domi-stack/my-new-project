@@ -1977,6 +1977,20 @@ if barstate.isfirst
              color = color.new(color.gray, 100), textcolor = color.new(color.gray, 100),
              size = size.small))
 
+//  §3 de la v5.4 · PREDICADO ÚNICO de "zona operable". Antes había dos
+//  criterios distintos para la misma pregunta: la selección del modo limpio
+//  solo exigía estado y no disparada, mientras la capa de acción exigía además
+//  tier >= 1 y distancia dentro de i_distMaxATR. Las dos discrepaban, y se veía:
+//  la tabla mostraba una zona a 6,79 ATR con el radio operable en 6,0.
+//
+//  Ahora las dos consumen ESTO. Un predicado y no una función que devuelva un
+//  índice, porque los dos consumidores necesitan cosas distintas —la capa de
+//  acción UNA zona, el modo limpio N por lado— y lo que tenía que unificarse
+//  era el criterio, no el resultado.
+f_zonaOperable(Zona z) =>
+    float dA = na(atr) or atr <= 0 ? 1e12 : math.abs(z.mid - close) / atr
+    z.state <= 1 and not z.fired and z.tier >= 1 and dA <= i_distMaxATR
+
 // Índice de la zona destacada más cercana por lado, para la tabla reducida.
 var int altaArriba = -1
 var int altaAbajo  = -1
@@ -2018,7 +2032,7 @@ if i_soloAlta and barstate.isconfirmed and array.size(zones) > 0
             for i = 0 to array.size(zones) - 1
                 Zona z = array.get(zones, i)
                 bool libre    = not array.includes(elegidas, i)
-                bool operable = z.state <= 1 and not z.fired
+                bool operable = f_zonaOperable(z)
                 bool enLado   = lado == 1 ? z.mid > close : z.mid < close
                 if libre and operable and enLado
                     float d = math.abs(z.mid - close)
@@ -3845,8 +3859,7 @@ float candD = 1e12
 if array.size(zones) > 0
     for i = 0 to array.size(zones) - 1
         Zona z = array.get(zones, i)
-        float dATR = na(atr) ? 1e12 : math.abs(z.mid - close) / atr
-        if z.state <= 1 and not z.fired and z.tier >= 1 and dATR <= i_distMaxATR
+        if f_zonaOperable(z)
             float d = math.abs(z.mid - close)
             if z.score > candS or (z.score == candS and d < candD)
                 candI := i
@@ -4295,9 +4308,10 @@ if i_soloAlta and barstate.islast
     if hayZona
         Zona z = array.get(zones, zi)
         zDir := z.dir
+        float dZ = na(atr) or atr <= 0 ? na : math.abs(z.mid - close) / atr
         zTxt := (z.dir == 1 ? "COMPRA" : "VENTA") + " · " + z.tf + " · " +
              str.tostring(z.score) + " " + f_tierTxt(z.tier) + " · " +
-             str.tostring(na(atr) ? na : math.abs(z.mid - close) / atr, "#.##") + " ATR"
+             str.tostring(dZ, "#.##") + " ATR de " + str.tostring(i_distMaxATR, "#.#")
 
     table.cell(limpia, 0, 0, accTxt, text_color = color.white, bgcolor = accCol,
          text_size = size.large, text_halign = text.align_center)
