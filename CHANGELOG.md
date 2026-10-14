@@ -6,6 +6,55 @@ Convención: ⚠️ marca lo que **mueve la lista de operaciones** del Strategy 
 
 ---
 
+## v5.6 · Capa HOD/LOD · se integra como medición, no como señal
+
+Portado de `HOD_LOD_Zonas v1.0` (fichero aportado por el usuario) a la **sección 11**. En la apertura del día dibuja dos cajas —dónde es probable el máximo, dónde el mínimo— usando solo lo que se sabe en ese momento, y al cerrar el día se puntúa a sí misma.
+
+**No mueve la lista de operaciones, y no por los defectos sino por construcción:** no genera candidatos, no aparece en la máscara de vetos y no toca ninguna decisión de entrada. Encenderla cambia el dibujo y añade una tabla; nada más.
+
+### Por qué no es una fuente S9
+
+Su propia cabecera dice que no es una señal de entrada y que **no simula operaciones, así que no dice nada sobre si gana dinero**. Exponerla como disparador habría contradicho al autor. Entra donde entran el perfil horario y la deriva por hora: describe, no opera.
+
+### La aritmética que hay que tener delante antes de mirar la tabla
+
+Cobertura y ancho de caja son **la misma magnitud vista de dos formas**: una caja más ancha siempre cubre más. Por eso la tabla muestra siempre las dos cifras juntas, y por eso hay una fila que dice literalmente «cobertura sin ancho: no es métrica». Sobre 109 sesiones de XAUUSD (ADR 122,8 pts), con el predictor calibrado a posteriori —o sea haciendo trampa a favor del modelo—:
+
+| Ancho de caja | HOD | LOD | CONJUNTA |
+|---|---|---|---|
+| 6 % del ADR (el defecto comercial) | 14,7 % | 11,0 % | **0,0 %** |
+| 30 % del ADR | 47,7 % | 38,5 % | 5,5 % |
+| 50 % del ADR | 65,1 % | 57,8 % | 25,7 % |
+
+Para una cobertura conjunta del 91 % hacen falta cajas de **~140 % del ADR cada una**. Con el 6 % por defecto la cobertura conjunta en oro es cero, y no es un fallo del modelo: el máximo exacto del día no cabe en una ventana de 7 puntos.
+
+### Cuatro bugs del fichero original, arreglados al portarlo
+
+| Bug | Qué hacía | Arreglo |
+|---|---|---|
+| **CW10002** | `ta.change(time("D"))` dentro de un `and` detrás de un `or`. Función con estado que puede no evaluarse: historial equivocado y **ningún error**. Es la misma clase que el usuario reportó en la v5.2 | Se calcula en ámbito global |
+| **División entera en `f_pc`** | `a / b * 100.0` con los dos argumentos `int`. En Pine `int/int` trunca, así que con `a < b` da 0: **toda la columna de cobertura habría salido «0.0%»**. Verificado: 14/109 → 0,0 % en vez de 12,8 %; 52/109 → 0,0 % en vez de 47,7 % | `a * 100.0 / b` |
+| **La misma división en la «Ventaja»** | El veredicto contra el predictor tonto solo podía salir 0 o ±100 pp. Es justo la cifra que uno mira para decidir si apagar el contexto | `* 100.0 /` y formato `F_SIGNO`, que de paso evita el `-+6.5` |
+| **«Media de 20 días» que eran 100 minutos** | El input prometía la media de 20 días; el código era `ta.sma(close, 20)`, que en 5 minutos son **20 velas**. Uno de los cuatro filtros de contexto medía otra cosa | Array propio de cierres diarios, media de los 20 últimos. Con array y no con `request.security` para no gastar presupuesto y, sobre todo, para usar **la misma frontera de día** que el resto de la sección |
+
+### Decisiones de integración
+
+| Decisión | Motivo |
+|---|---|
+| **`i_hlOn` apaga el dibujo y la tabla, NO el motor** | Los arrays y los `ta.*` siguen en ámbito global. Si el motor estuviera detrás del interruptor se evaluaría de forma intermitente y el histórico saldría mal al encenderlo. Es el patrón del filtro de chop, y lo que la cabecera del fichero original ya advertía |
+| **Día propio: `time("D")`, no el día CME de las 18:00 ET** | `hod`/`lod` y el régimen usan el día CME. Las cifras de calibración de arriba se tomaron con `time("D")`; cambiar la frontera movería **lo que el modelo mide**, no solo cuándo lo mide |
+| **Tabla en `middle_right`** | `diag` y `limpia` ya se apilan en `top_right` |
+| **`i_hlVerHist`: maxval 300 → 100** | Aritmética, no gusto: 300 días son 600 cajas y Pine admite 500. Con las zonas al máximo (200) y los rangos de sesión al máximo (60) quedan 240 libres, o sea 120 días; se deja en 100 por margen. Pasado el límite Pine borra las cajas viejas **sin avisar**, y lo que se ve deja de corresponder con lo que la tabla cuenta |
+| **`max_lines_count`: 400 → 500** | Peor caso con todo al máximo: 460/500 cajas y 330/500 líneas. Plots 26/64 y `request.security` 6/40 sin cambios |
+| **Se quedan fuera `pHigh`, `pLow`, `dBarIni`** | Se escribían en cada cambio de día y no se leían en ninguna parte |
+| **Se queda fuera el `alertcondition`** | «Zonas del día calculadas» en una estrategia solo añade ruido |
+
+Única colisión entre los 90 identificadores nuevos y los existentes: `G_VIS` → `G_HL_VIS`.
+
+**No compilado.** No hay TradingView ni intérprete de Pine en este entorno. Pasa los cinco chequeos estáticos de `scripts/verificar_pine.py` y los recuentos de recursos de arriba; nada más está verificado.
+
+---
+
 ## Encargo 3 · S7 order block y S8 OTE
 
 Las dos **apagadas**, así que con los defectos de la v5.4 la lista de operaciones no se mueve. Documento: `docs/ESTRATEGIAS_S1_S8.md` (renombrado desde `_S1_S5`).
