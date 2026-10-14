@@ -6,6 +6,24 @@
 >
 > Todo lo demás de la v2.7 es dibujo y no puede mover ni una operación: HOD/LOD, relleno de zonas, rótulos, tope de cuatro niveles, filas de tabla y la retirada del aviso de spot.
 
+## ⚠️ Desde la v5.4 los defectos YA NO son la línea base
+
+Hasta la v5.3, cargar el script y no tocar nada reproducía la línea base. **Eso ha dejado de ser cierto**: la v5.4 enciende las seis fuentes nuevas y pone el cupo diario a 0. Antes de generar o comparar nada hay que fijar a mano:
+
+| Input | Valor |
+|---|---|
+| `Máximo de operaciones al día` | **1** |
+| `Activar S1` … `Activar S6` (los seis) | **false** |
+| `Modo horario` | `Ventana NY` |
+| Los cuatro frenos y el enfriamiento | 0 |
+| `Operar solo zonas ALTA` | no |
+| `Operar Silver Bullet` / `falso rompimiento asiático` | no |
+| `Veto por ADR agotado` | no |
+| `Fuerza mínima para operar` | 0 |
+| `Vetar entradas en volatilidad comprimida` | no |
+
+Con menos que eso, lo que midas no es comparable con nada.
+
 ## Por qué se rehace
 
 La regla 0.1 del V2.1 compara contra "la lista de operaciones de partida". Esa lista no sirve:
