@@ -6,6 +6,50 @@ Convención: ⚠️ marca lo que **mueve la lista de operaciones** del Strategy 
 
 ---
 
+## v5.4 · Tres incoherencias, y las seis fuentes encendidas
+
+### Las tres correcciones
+
+| Cambio | Motivo |
+|---|---|
+| **`i_maxTrades` admite 0 = sin límite** | Era el único freno que no seguía la convención de `0 = apagado` de `i_maxPerdDia`, `i_minRDia`, `i_maxRDia` e `i_enfriar`, y por tanto el único que no se podía apagar. `minval` 0, `maxval` 50, y en la máscara el bit solo se pone si `i_maxTrades > 0`. De paso: `V_DIARIO` lo comparten el límite y los frenos, así que con el límite a 0 el panel decía «límite diario alcanzado» cuando lo que había era un freno — ahora distingue |
+| ⚠️ **Las flechas EJECUTAR solo salen si se envió la orden** | **Bug mío, de la v2.9-2.** `accTxt := "EJECUTAR"` se asignaba con `setDir != 0`, que es el resultado del resolutor, y la máscara se evalúa **después**. Salían flechas grandes en velas sin ninguna entrada: con el límite diario alcanzado, decenas de flechas y cero operaciones. Ahora hay una bandera `opEjecutada` que se pone a true en la **única** llamada a `strategy.entry` del fichero, así que el número de flechas coincide con el de entradas por construcción. El candidato vetado tiene estado propio, «SEÑAL VETADA», que **nombra** los vetos, y marcador propio: una **x pequeña**, nunca un triángulo |
+| **Un solo criterio de zona operable** | Había dos para la misma pregunta: el modo limpio exigía estado y no disparada; la capa de acción exigía además `tier >= 1` y distancia dentro de `i_distMaxATR`. Discrepaban y se veía: la tabla mostraba una zona a 6,79 ATR con el radio en 6,0. Ahora las dos consumen `f_zonaOperable`. Es un **predicado**, no una función que devuelva un índice, porque los consumidores necesitan cosas distintas —una zona frente a N por lado— y lo que había que unificar era el criterio |
+
+### ⚠️ Las seis fuentes pasan a encendidas, y el cupo diario a 0
+
+`i_s1On`, `i_s2On`, `i_s3On`, `i_s4On`, `i_s5On` e `i_s6On` pasan a `true`. `i_maxTrades` pasa de 3 a **0**.
+
+**Esto rompe la garantía de regresión que había desde la v2.8.** Hasta aquí, los defectos reproducían la línea base y eso era una propiedad del código. Ya no: con seis fuentes activas y sin cupo diario, la lista de operaciones con los defectos **no se parece** a la de la v2.7.
+
+#### Para la línea base de regresión hay que poner, a mano:
+
+| Input | Valor |
+|---|---|
+| `Máximo de operaciones al día` | **1** |
+| `Activar S1 · barrido de liquidez` | **false** |
+| `Activar S2 · pullback a VWAP` | **false** |
+| `Activar S3 · fade de bandas` | **false** |
+| `Activar S4 · segundo movimiento tras noticias` | **false** |
+| `Activar S5 · sesgo horario` | **false** |
+| `Activar S6 · barrido con confirmación` | **false** |
+| `Modo horario` | `Ventana NY` |
+| Los cuatro frenos y el enfriamiento | 0 |
+
+Con eso vuelve el camino de la v2.7 y la comparación contra `backtests/baseline-v2.7.csv` sigue teniendo sentido. **Sin eso, no.**
+
+#### Tres cosas que cambian de peso al encenderlas todas
+
+1. **Sin límite diario ≠ riesgo sin límite.** `pyramiding = 0` y el veto de posición abierta siguen permitiendo **una sola operación a la vez**, así que las señales se serializan en vez de acumularse. Lo que sí cambia es cuántas entran al día.
+2. **El reparto de cupo y la regla de conflicto pasan a mandar de verdad.** Con una sola fuente nunca se usaban. Ahora `Prioridad` (que sigue en `FVG primero`) decide quién gana la vela, y `Conflictos de dirección` del panel dice cuántas veces dos fuentes se contradijeron: **si ese número es alto, se están estorbando y el problema no es el umbral de ninguna.**
+3. **S2 y S3 dependen del clasificador de régimen.** Son excluyentes por construcción, pero si el clasificador pasa el día «sin clasificar» —menos de 12 velas— ninguna de las dos opera.
+
+#### Y lo que no ha cambiado
+
+Que las cinco son **hipótesis sin validar** y S6 también. Encenderlas las pone a medir, no las valida. Lo que decide si alguna vale es su propia fila de la tabla de resultados a 40 operaciones para el signo y 100 para la magnitud — y el caso que esta versión hace más probable es justamente el que la tabla existe para detectar: **un total positivo que viene de una sola fuente mientras las otras pierden.**
+
+---
+
 ## v5.3 · Hacer que dispare y poder medirlo
 
 Encargo 2. Partía del indicador v5.2, que daba **cero disparos en cinco días** con decenas de ARMADO. Esa máquina entra aquí como la fuente **S6**, apagada.

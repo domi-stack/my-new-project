@@ -2,14 +2,25 @@
 // =============================================================================
 //  MGC 12-26 (Micro Gold Futures) · FVG + Estructura de mercado · 5 minutos
 // =============================================================================
-//  Estrategia de varias operaciones diarias (v5.3) sobre zonas de imbalance
-//  (Fair Value Gaps) validadas por estructura de mercado multimarco, más cinco
-//  fuentes de señal adicionales (S1 a S5), TODAS APAGADAS POR DEFECTO.
+//  Estrategia de varias operaciones diarias (v5.4) sobre zonas de imbalance
+//  (Fair Value Gaps) validadas por estructura de mercado multimarco, más seis
+//  fuentes de señal adicionales (S1 a S6).
+//
+//  DESDE LA v5.4 LAS SEIS VIENEN ENCENDIDAS Y EL CUPO DIARIO A 0. Eso ROMPE la
+//  garantía de regresión que había desde la v2.8: los defectos ya NO reproducen
+//  la línea base. Para volver a ella hay que poner las seis a false, el cupo
+//  diario a 1 y el modo horario en 'Ventana NY'. La lista exacta está en
+//  CHANGELOG.md, apartado v5.4.
+//
+//  Encenderlas las pone a MEDIR, no las valida: las seis siguen siendo
+//  hipótesis. Lo que decide si alguna vale es su propia fila de la tabla de
+//  resultados, a 40 operaciones para el signo y 100 para la magnitud.
 //
 //  LAS SEIS FUENTES Y SU ESTADO:
 //   · FVG + estructura   el sistema original. Sin calibrar, pero es el que
 //                        define la línea base de regresión.
 //   · S1 barrido         HIPÓTESIS. Espejo del ORB medido; sin comprobar.
+//                        (las seis de abajo vienen ENCENDIDAS desde la v5.4)
 //   · S2 pullback VWAP   HIPÓTESIS. Depende del clasificador de régimen.
 //   · S3 fade de bandas  HIPÓTESIS. Excluyente con S2 por construcción.
 //   · S4 noticias        HIPÓTESIS. Comprobar antes la norma de la prop firm.
@@ -159,11 +170,13 @@ i_sessMadrid  = input.session("1530-1900", "Ventana (hora de Madrid)", group = G
 i_sessNY      = input.session("0930-1300", "Ventana (hora de NY)",     group = G_SES)
 i_closeMadrid = input.int(21, "Hora de cierre forzoso (Madrid)", minval = 0, maxval = 23, group = G_SES)
 i_closeNY     = input.int(15, "Hora de cierre forzoso (NY)",     minval = 0, maxval = 23, group = G_SES)
-i_maxTrades   = input.int(3,  "Máximo de operaciones al día (0 = sin límite)", minval = 0, maxval = 50, group = G_SES,
-     tooltip = "0 DESACTIVA el límite, igual que en los frenos y el enfriamiento: era el único que no seguía esa convención y por tanto " +
-               "el único freno que no se podía apagar.\n\n" +
-               "Cuenta por día de trading, que en modo 24 h empieza a las 18:00 ET. Ponlo en 1 para reproducir la línea base de " +
-               "regresión; el defecto de 3 es la decisión de la v2.6.")
+i_maxTrades   = input.int(0,  "Máximo de operaciones al día (0 = sin límite)", minval = 0, maxval = 50, group = G_SES,
+     tooltip = "DEFECTO 0: SIN LÍMITE DIARIO. Con seis fuentes activas el cupo era el cuello de botella, y la primera que disparaba se " +
+               "lo llevaba entero.\n\n" +
+               "Sin límite NO significa riesgo sin límite: pyramiding = 0 y el veto de posición abierta siguen permitiendo una sola " +
+               "operación a la vez, así que las señales se serializan en vez de acumularse.\n\n" +
+               "Cuenta por día de trading, que en modo 24 h empieza a las 18:00 ET. Para la LÍNEA BASE DE REGRESIÓN hay que poner 1 " +
+               "aquí y las seis fuentes a false; ver CHANGELOG.md.")
 
 // --- Fair Value Gaps ---------------------------------------------------------
 const string G_FVG = "Fair Value Gaps"
@@ -449,8 +462,12 @@ i_chopRango = input.float(2.0, "…o rango de 20 velas por debajo de (x ATR)", m
                "precio está dentro de él, es rango activo. Ponlo a 0 para desactivar solo esta mitad.")
 
 const string G_S1 = "S1 · Barrido de liquidez"
-i_s1On      = input.bool(false, "Activar S1 · barrido de liquidez", group = G_S1,
-     tooltip = "APAGADO. Hipótesis sin validar: el espejo del ORB que ya mediste. Enciéndelo para medirlo, no porque esté comprobado.")
+i_s1On      = input.bool(true, "Activar S1 · barrido de liquidez", group = G_S1,
+     tooltip = "MIDE: falsas rupturas de los extremos del día anterior, de Asia y de Londres. El precio pasa el nivel y la vela de 5m " +
+               "cierra de vuelta dentro, y se entra CONTRA la ruptura.\n\n" +
+               "Sigue siendo una HIPÓTESIS sin validar: es el espejo del ORB que mediste, y el espejo de una estrategia perdedora no es " +
+               "automáticamente ganadora. Encendida está para medirse, no porque esté comprobada.\n\n" +
+               "La tabla de resultados la separa en su propio grupo, 'S1 barrido', así que su esperanza no se mezcla con las demás.")
 i_s1Refs    = input.string("Día anterior + Asia + Londres", "Niveles que cuentan como liquidez",
      options = ["Solo día anterior", "Día anterior + Asia", "Día anterior + Asia + Londres"], group = G_S1)
 i_s1Vent    = input.session("0800-1130", "Ventana de S1 (hora de Nueva York)", group = G_S1,
@@ -478,11 +495,13 @@ i_s1PorLado = input.bool(true, "Máximo una operación por lado y día", group =
 
 // --- S2 · pullback a VWAP en día tendencial ---------------------------------
 const string G_S2 = "S2 · Pullback a VWAP"
-i_s2On      = input.bool(false, "Activar S2 · pullback a VWAP", group = G_S2,
-     tooltip = "APAGADA. Solo puede operar con el día clasificado como TENDENCIA, así que depende del clasificador de régimen.\n\n" +
+i_s2On      = input.bool(true, "Activar S2 · pullback a VWAP", group = G_S2,
+     tooltip = "MIDE: el retroceso al VWAP, o a su banda de 1σ, en un día tendencial. Solo opera con el día clasificado como " +
+               "TENDENCIA, así que depende del clasificador de régimen y es MUTUAMENTE EXCLUYENTE con S3.\n\n" +
                "AVISO SOBRE LOS DATOS: en MGC el volumen es real y su VWAP es fiable. En XAUUSD spot de Dukascopy el volumen es cuenta " +
                "de ticks, así que el VWAP es una APROXIMACIÓN y un backtest de S2 sobre esos datos mide una serie que no es la que " +
-               "operarías. Vale para descartar, no para confirmar.")
+               "operarías. Vale para descartar, no para confirmar.\n\n" +
+               "Grupo propio en la tabla de resultados: 'S2 pullback'.")
 i_s2Desde   = input.int(30, "Entradas desde (minutos tras la apertura de NY)", minval = 0, maxval = 390, group = G_S2)
 i_s2Hasta   = input.int(60, "Entradas hasta (minutos tras la apertura de NY)", minval = 5, maxval = 390, group = G_S2,
      tooltip = "La especificación dice 'pasados 30 a 60 minutos', y así está puesto. Es una ventana ESTRECHA: el retroceso tiene que " +
@@ -502,11 +521,13 @@ i_s2R       = input.float(1.8, "R fijo del objetivo", minval = 0.5, maxval = 5.0
 
 // --- S3 · fade de las bandas ±2σ en día de rango ----------------------------
 const string G_S3 = "S3 · Fade de bandas"
-i_s3On      = input.bool(false, "Activar S3 · fade de bandas", group = G_S3,
-     tooltip = "APAGADA. Solo puede operar con el día clasificado como RANGO, así que es mutuamente excluyente con S2 por " +
-               "construcción, no por un filtro añadido.\n\n" +
-               "Le aplica el MISMO aviso de datos que a S2: el VWAP de XAUUSD spot de Dukascopy es una aproximación, y aquí además la " +
-               "señal es la DESVIACIÓN TÍPICA de ese VWAP, que hereda el error amplificado.")
+i_s3On      = input.bool(true, "Activar S3 · fade de bandas", group = G_S3,
+     tooltip = "MIDE: la vuelta a la media desde las bandas ±2σ en un día de rango. La vela perfora la banda y cierra de vuelta " +
+               "dentro. Solo opera con el día clasificado como RANGO, así que es mutuamente excluyente con S2 POR CONSTRUCCIÓN, no por " +
+               "un filtro añadido.\n\n" +
+               "Le aplica el MISMO aviso de datos que a S2, y peor: aquí la señal es la DESVIACIÓN TÍPICA de ese VWAP aproximado, que " +
+               "hereda el error amplificado.\n\n" +
+               "Grupo propio en la tabla de resultados: 'S3 fade'.")
 i_s3Sigma   = input.float(2.0, "Sigmas de la banda que se opera", minval = 1.0, maxval = 4.0, step = 0.25, group = G_S3)
 i_s3Margen  = input.float(0.5, "Margen del stop más allá de la mecha (USD/oz)", minval = 0.0, step = 0.1, group = G_S3)
 i_s3Obj     = input.string("VWAP del día", "Objetivo de S3",
@@ -517,8 +538,10 @@ i_s3R       = input.float(1.5, "R fijo del objetivo", minval = 0.5, maxval = 5.0
 
 // --- S4 · segundo movimiento tras noticias ----------------------------------
 const string G_S4 = "S4 · Segundo movimiento tras noticias"
-i_s4On      = input.bool(false, "Activar S4 · segundo movimiento tras noticias", group = G_S4,
-     tooltip = "APAGADA, y con un motivo añadido al de las demás: COMPRUEBA ANTES SI TU PROP FIRM RESTRINGE OPERAR NOTICIAS. Muchas " +
+i_s4On      = input.bool(true, "Activar S4 · segundo movimiento tras noticias", group = G_S4,
+     tooltip = "MIDE: la ruptura, o el fallo, del rango de la vela que contiene la publicación, entre 5 y 15 minutos después. Grupo " +
+               "propio en la tabla: 'S4 noticias'.\n\n" +
+               "ENCENDIDA, Y CON UN AVISO QUE NO HA CAMBIADO: COMPRUEBA SI TU PROP FIRM RESTRINGE OPERAR NOTICIAS. Muchas " +
                "evaluaciones prohíben tener posición abierta en una ventana alrededor de las publicaciones y anulan la cuenta o la " +
                "operación si se incumple, con independencia del resultado. Que el código pueda no significa que el contrato permita.\n\n" +
                "Ojo además con el bloqueo por noticias de la Ventana de operativa: si usas ese input a la vez, su veto se aplica " +
@@ -542,9 +565,12 @@ i_s4UnaPorN = input.bool(true, "Máximo una operación por publicación", group 
 //  día". No dispara nunca nada por su cuenta; solo inclina la puntuación de los
 //  candidatos de S1 y S2, que es lo que pedía la especificación.
 const string G_S5 = "S5 · Sesgo horario"
-i_s5On      = input.bool(false, "Activar S5 · sesgo horario", group = G_S5,
-     tooltip = "APAGADO. NUNCA DISPARA NADA: solo suma o resta puntos a los candidatos de S1 y S2. Si no pones además un mínimo de " +
-               "puntuación, encenderlo no cambia ninguna decisión, solo la puntuación que se ve.")
+i_s5On      = input.bool(true, "Activar S5 · sesgo horario", group = G_S5,
+     tooltip = "NO ES UN SISTEMA Y NUNCA DISPARA NADA: solo suma o resta puntos a los candidatos de S1 y S2, y por eso NO tiene grupo " +
+               "en la tabla de resultados.\n\n" +
+               "MIDE: la deriva por hora ET sobre tus propios datos, y usa su signo. Encendido con la puntuación mínima a 0 —el " +
+               "defecto— NO cambia ninguna decisión: solo describe. Es el input 'Puntuación mínima del candidato' el que lo convierte " +
+               "en filtro.")
 i_s5Modo    = input.string("Medido en el gráfico", "De dónde sale el sesgo de la hora",
      options = ["Medido en el gráfico", "Hipótesis fija (Asia alcista)"], group = G_S5,
      tooltip = "MEDIDO EN EL GRÁFICO es el defecto: se acumula la deriva (cierre − apertura) de cada hora ET sobre los datos que estés " +
@@ -574,9 +600,11 @@ i_s5MinScr  = input.int(0, "Puntuación mínima del candidato (0 = no descarta)"
 //  fase 2 del encargo solo cambiará los defectos de los filtros que el
 //  contador exclusivo señale, con 20 sesiones medidas delante.
 const string G_S6 = "S6 · Barrido con confirmación"
-i_s6On      = input.bool(false, "Activar S6 · barrido con confirmación", group = G_S6,
-     tooltip = "APAGADA. Es la máquina ARMADO -> DISPARO del indicador v5, con el saneamiento de SL de la v5.3. Se mide en la tabla " +
-               "por estrategia igual que S1-S5.")
+i_s6On      = input.bool(true, "Activar S6 · barrido con confirmación", group = G_S6,
+     tooltip = "MIDE: barrido de liquidez que se ARMA y espera confirmación, con el SL saneado de la v5.3 (mínimo 0,8 ATR, máximo 2,5, " +
+               "más colchón de spread). Es la máquina ARMADO -> DISPARO del indicador v5.\n\n" +
+               "Grupo propio en la tabla: 'S6 confirmado'. Y además lleva su propio modo diagnóstico, que cuenta por qué NO dispara " +
+               "cada ARMADO que muere: es la única fuente que explica sus no-señales.")
 //  FASE 2 · 65 -> 50. Valor PROPUESTO POR EL ENCARGO, no medido: los
 //  contadores que debían decidirlo no existen todavía. El valor de la fase 1
 //  era 65 y está en CHANGELOG.md, así que volver atrás es cambiar un número.
