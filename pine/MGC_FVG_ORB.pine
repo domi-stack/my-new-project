@@ -2,9 +2,16 @@
 // =============================================================================
 //  MGC 12-26 (Micro Gold Futures) · FVG + Estructura de mercado · 5 minutos
 // =============================================================================
-//  Estrategia de varias operaciones diarias (v5.5) sobre zonas de imbalance
+//  Estrategia de varias operaciones diarias (v5.6) sobre zonas de imbalance
 //  (Fair Value Gaps) validadas por estructura de mercado multimarco, más ocho
 //  fuentes de señal adicionales (S1 a S8).
+//
+//  LA SECCIÓN 11 NO ES UNA FUENTE DE SEÑAL. Es la capa HOD/LOD: predice en la
+//  apertura dónde es probable que caiga el máximo y el mínimo del día y se
+//  puntúa a sí misma walk-forward. No genera candidatos, no entra en la máscara
+//  de vetos y no toca ninguna decisión de entrada. Viene APAGADA. Lo que mide
+//  es cobertura, no rentabilidad, y en oro una cobertura alta y una caja
+//  estrecha son incompatibles: ver la aritmética en la cabecera de la sección.
 //
 //  ESTADO DE LAS FUENTES EN LOS DEFECTOS:
 //    FVG + estructura   siempre activa, es el sistema base
@@ -102,7 +109,7 @@ strategy(
      process_orders_on_close = true,         // entra al cierre que dispara la señal
      max_boxes_count         = 500,
      max_labels_count        = 500,
-     max_lines_count         = 400,
+     max_lines_count         = 500,
      //  Buffer de histórico explícito (v2.8). Las estrategias nuevas leen
      //  series con desplazamiento VARIABLE: close[k] en el contador de cierres
      //  fuera de S1 y vwap[N] en la pendiente de S2, con N de input hasta 60.
@@ -5130,3 +5137,500 @@ if i_showTable and verExtras and barstate.islast
     // celda escrita en una vela anterior seguiría ahí.
     if r <= N_DIAG - 1
         table.clear(diag, 0, r, 1, N_DIAG - 1)
+
+// =============================================================================
+//  11 · HOD / LOD · ZONAS PREVISTAS DEL DÍA (portado de HOD_LOD_Zonas v1.0)
+// =============================================================================
+//  QUÉ HACE. En la apertura del día calcula dos cajas: dónde es probable que se
+//  forme el máximo (roja) y dónde el mínimo (verde), usando SOLO información
+//  disponible en ese momento. Al cerrar el día se puntúa a sí mismo.
+//
+//  QUÉ NO ES, Y ESTO ES LO IMPORTANTE. No es una señal de entrada. Tocar una
+//  caja NO significa que ahí esté el extremo definitivo. No simula operaciones,
+//  comisiones ni beneficios, así que NO DICE NADA sobre si esto es rentable.
+//  Dice una cosa sola: con qué frecuencia el extremo real cae dentro de la caja
+//  prevista.
+//
+//  POR ESO NO ES UNA FUENTE S9. Convertirlo en disparador contradiría su propia
+//  cabecera. Entra como capa de MEDICIÓN, igual que el perfil horario o la
+//  deriva por hora: describe, no opera.
+//
+//  PUNTUACIÓN WALK-FORWARD: el día N se predice con los parámetros estimados
+//  únicamente con los días 1..N-1. Nunca se reajusta sobre la misma muestra que
+//  se puntúa. Ajustar mirando todo el histórico y puntuar ese mismo histórico
+//  sube la cobertura sola y no mide capacidad predictiva, mide memoria.
+//
+//  LA ARITMÉTICA QUE HAY QUE TENER DELANTE. Cobertura y ancho de caja son la
+//  misma magnitud vista de dos formas: una caja más ancha siempre cubre más. Por
+//  eso la tabla muestra SIEMPRE las dos cifras juntas. Medido sobre 109 sesiones
+//  de XAUUSD (ADR 122,8 pts) con un predictor calibrado a posteriori, que es
+//  hacer trampa a favor del modelo:
+//      caja =  6% del ADR  ->  HOD 14,7%  LOD 11,0%  CONJUNTA  0,0%
+//      caja = 30% del ADR  ->  HOD 47,7%  LOD 38,5%  CONJUNTA  5,5%
+//      caja = 50% del ADR  ->  HOD 65,1%  LOD 57,8%  CONJUNTA 25,7%
+//  Para una cobertura conjunta del 91% hacen falta cajas de ~140% del ADR cada
+//  una. Una cobertura alta y una caja estrecha no pueden darse a la vez.
+//
+//  TRES ARREGLOS AL PORTARLO, los tres encontrados al leerlo:
+//   1. ta.change(time("D")) estaba dentro de un `and` detrás de un `or`. Es el
+//      CW10002 de siempre: función con estado que puede no evaluarse, historial
+//      equivocado y ningún error. Ahora se calcula en ámbito global.
+//   2. f_pc hacía `a / b * 100.0` con los dos argumentos int. En Pine eso es
+//      división ENTERA, así que con a < b daba 0 y TODA la columna de cobertura
+//      habría salido "0.0%". Ahora multiplica antes de dividir, que es correcto
+//      con independencia de cómo Pine promocione los tipos.
+//   3. El cálculo de la ventaja tenía la misma división entera.
+//
+//  DÍA PROPIO A PROPÓSITO: usa el día del exchange, time("D"), y NO el día CME
+//  de las 18:00 ET que usan HOD/LOD y el régimen. Cambiarlo movería lo que el
+//  modelo mide, y las cifras de arriba se tomaron con time("D").
+//
+//  EL MOTOR SE EJECUTA SIEMPRE; lo que se apaga es el dibujo y la tabla. Si el
+//  motor estuviera detrás del interruptor, sus arrays y sus ta.* se evaluarían
+//  de forma intermitente y el histórico saldría mal al encenderlo.
+
+const string G_HL     = "HOD/LOD · Modelo"
+const string G_HL_CTX = "HOD/LOD · Contexto"
+const string G_HL_CAJ = "HOD/LOD · Ancho de las cajas"
+const string G_HL_VIS = "HOD/LOD · Visual"
+
+i_hlOn      = input.bool(false, "Activar la capa HOD/LOD", group = G_HL_VIS,
+     tooltip = "APAGADA. Es una capa de MEDICIÓN, no una fuente de señal: no genera candidatos ni entra en la máscara de vetos. " +
+               "Encenderla añade dos cajas y dos líneas por sesión al gráfico.")
+i_hlAdrLen  = input.int(20, "Días del ADR", minval = 5, maxval = 100, group = G_HL,
+     tooltip = "Es la unidad en la que se mide todo: excursiones, ancho de caja y error. Así vale igual en MGC que en XAUUSD.")
+i_hlEst     = input.string("Cuantil", "Estimador", options = ["Cuantil", "Media ponderada"], group = G_HL,
+     tooltip = "CUANTIL: el centro de la caja se pone en el cuantil elegido de las excursiones pasadas. Es el que permite apuntar a una " +
+               "cobertura concreta.\n\nMEDIA PONDERADA: más estable, pero no controla la cobertura.")
+i_hlCuantil = input.float(50.0, "Cuantil del centro (%)", minval = 5.0, maxval = 95.0, step = 2.5, group = G_HL)
+i_hlLambda  = input.float(0.97, "Decaimiento de la media ponderada", minval = 0.80, maxval = 1.00, step = 0.01, group = G_HL)
+i_hlMaxHist = input.int(500, "Días de histórico en memoria", minval = 40, maxval = 2000, group = G_HL)
+i_hlMinMues = input.int(30, "Muestra mínima para usar el contexto", minval = 10, maxval = 200, group = G_HL_CTX,
+     tooltip = "Si tras los filtros quedan menos días que esto, se IGNORA el contexto y se usa el histórico completo. Sin esta red, un " +
+               "filtro estrecho acaba estimando con seis días y lo que sale es ruido con formato de porcentaje.")
+i_hlCtxDow  = input.bool(false, "Contexto · mismo día de la semana",            group = G_HL_CTX)
+i_hlCtxSig  = input.bool(false, "Contexto · mismo signo que la vela de ayer",   group = G_HL_CTX)
+i_hlCtxTend = input.bool(false, "Contexto · mismo lado de la media de 20 días", group = G_HL_CTX)
+i_hlCtxGap  = input.bool(false, "Contexto · tramo de gap de apertura",          group = G_HL_CTX)
+i_hlGapUmb  = input.float(0.15, "Umbral del gap (x ADR)", minval = 0.01, maxval = 1.0, step = 0.01, group = G_HL_CTX)
+i_hlAnchoMd = input.string("% del ADR", "Cómo se fija el ancho",
+     options = ["% del ADR", "Cuantiles de la distribución"], group = G_HL_CAJ,
+     tooltip = "% DEL ADR: grosor fijo. Es el modo honesto para comparar, porque el ancho no se mueve al cambiar otra cosa.\n\n" +
+               "CUANTILES: la caja se ensancha sola para cubrir el porcentaje pedido, lo que convierte la cobertura en una profecía " +
+               "autocumplida. Por eso la tabla sigue mostrando el ancho medio resultante.")
+i_hlAnchoPc = input.float(6.0, "Grosor de la caja (% del ADR)", minval = 1.0, maxval = 200.0, step = 1.0, group = G_HL_CAJ,
+     tooltip = "6 % es el valor por defecto de los productos comerciales que hacen esto. Con 6 % la cobertura CONJUNTA en oro es " +
+               "prácticamente cero, y no es un fallo del modelo: el máximo exacto del día no cabe en una ventana de 7 puntos.")
+i_hlCobObj  = input.float(60.0, "Cobertura nominal en modo cuantiles (%)", minval = 10.0, maxval = 98.0, step = 5.0, group = G_HL_CAJ,
+     tooltip = "Es NOMINAL, no garantizada: se calcula sobre el pasado y se aplica al futuro.")
+i_hlVerCaja = input.bool(true,  "Dibujar las cajas",           group = G_HL_VIS)
+i_hlVerLin  = input.bool(true,  "Línea central de cada caja",  group = G_HL_VIS)
+i_hlVerHist = input.int(40,     "Días anteriores en pantalla", minval = 0, maxval = 100, group = G_HL_VIS,
+     tooltip = "Cada día deja 2 cajas y 2 líneas, así que este número se multiplica por dos en ambos presupuestos.\n\n" +
+               "EL TOPE ES 100 Y NO 300 POR ARITMÉTICA, no por gusto: Pine admite 500 cajas. Con las zonas FVG al máximo (200) " +
+               "y los rangos de sesión al máximo (60) quedan 240 libres, es decir 120 días. Se deja en 100 para tener margen. " +
+               "Pasado el límite, Pine empieza a borrar las cajas más antiguas por su cuenta y sin avisar, y entonces lo que se " +
+               "ve en pantalla deja de corresponder con lo que la tabla cuenta.")
+i_hlVerAci  = input.bool(true,  "Colorear las cajas pasadas por acierto", group = G_HL_VIS,
+     tooltip = "Fuerte = el extremo cayó dentro. Gris = falló. Es la cobertura vista sin leer la tabla.")
+i_hlVerTbl  = input.bool(true,  "Tabla de puntuación",         group = G_HL_VIS)
+i_hlVerExt  = input.bool(true,  "Marcar el máximo y mínimo reales del día", group = G_HL_VIS)
+i_hlMinDias = input.int(60, "Días de calentamiento antes de puntuar", minval = 20, maxval = 500, group = G_HL)
+i_hlVerBase = input.bool(true, "Comparar con el predictor tonto", group = G_HL,
+     tooltip = "Mediana histórica sin contexto, mismo ancho de caja. SI EL MODELO NO LE GANA, EL CONTEXTO NO APORTA NADA.")
+
+//  ARREGLO 1 · ta.change en ámbito global y sin condicionales. Y ta.sma igual,
+//  que es lo que la cabecera del fichero original ya advertía.
+int   hlTimeD   = time("D")
+float hlCambioD = ta.change(hlTimeD)
+bool  hlNuevoDia = barstate.isfirst or (not na(hlTimeD) and nz(hlCambioD, 0) != 0)
+
+//  ARREGLO 4 · el original calculaba este filtro con ta.sma(close, 20), que en
+//  un gráfico de 5 minutos es la media de 20 VELAS: 100 minutos, no 20 días.
+//  El input decía «media de 20 días». Aquí se acumulan los cierres diarios en
+//  un array propio y se promedian los 20 últimos, que es lo que la etiqueta
+//  promete. Se hace con un array y no con request.security para no gastar
+//  presupuesto de peticiones y, sobre todo, para que use EXACTAMENTE la misma
+//  frontera de día, time("D"), con la que se calibró el modelo.
+var array<float> hlCierres = array.new_float()
+var float hlMed20 = na
+
+var float hlOpen = na
+var float hlHigh = na
+var float hlLow  = na
+var float hlPOpen  = na
+var float hlPClose = na
+
+var array<float> hlUp    = array.new_float()
+var array<float> hlDn    = array.new_float()
+var array<int>   hlDow   = array.new_int()
+var array<int>   hlSigno = array.new_int()
+var array<int>   hlTend  = array.new_int()
+var array<int>   hlGap   = array.new_int()
+var array<float> hlRango = array.new_float()
+
+var int   hlCDow  = na
+var int   hlCSig  = na
+var int   hlCTend = na
+var int   hlCGap  = na
+var float hlAdr   = na
+
+f_hlCuantil(array<float> a, float q) =>
+    int n = array.size(a)
+    float r = na
+    if n > 0
+        array<float> s = array.copy(a)
+        array.sort(s, order.ascending)
+        float pos = math.max(0.0, math.min(n - 1.0, q * (n - 1)))
+        int   lo  = int(math.floor(pos))
+        int   hi  = int(math.ceil(pos))
+        float w   = pos - lo
+        r := array.get(s, lo) * (1.0 - w) + array.get(s, hi) * w
+    r
+
+f_hlMediaPond(array<float> a, float lam) =>
+    int n = array.size(a)
+    float num = 0.0
+    float den = 0.0
+    if n > 0
+        for i = 0 to n - 1
+            float w = math.pow(lam, n - 1 - i)
+            num += array.get(a, i) * w
+            den += w
+    den > 0 ? num / den : na
+
+//  Índices del histórico que cumplen el contexto de hoy. Si la muestra no llega
+//  al mínimo devuelve TODOS: es preferible estimar con el histórico completo que
+//  con doce días.
+f_hlIndices() =>
+    array<int> idx = array.new_int()
+    int n = array.size(hlUp)
+    if n > 0
+        for i = 0 to n - 1
+            bool ok = true
+            if i_hlCtxDow and array.get(hlDow, i) != hlCDow
+                ok := false
+            if ok and i_hlCtxSig and array.get(hlSigno, i) != hlCSig
+                ok := false
+            if ok and i_hlCtxTend and array.get(hlTend, i) != hlCTend
+                ok := false
+            if ok and i_hlCtxGap and array.get(hlGap, i) != hlCGap
+                ok := false
+            if ok
+                array.push(idx, i)
+    if array.size(idx) < i_hlMinMues
+        array.clear(idx)
+        if n > 0
+            for i = 0 to n - 1
+                array.push(idx, i)
+    idx
+
+f_hlSub(array<float> src, array<int> idx) =>
+    array<float> o = array.new_float()
+    if array.size(idx) > 0
+        for k = 0 to array.size(idx) - 1
+            array.push(o, array.get(src, array.get(idx, k)))
+    o
+
+//  Predicción vigente, fijada en la apertura y NO vuelta a tocar durante el día.
+//  Ese «no vuelta a tocar» es lo que hace que la puntuación signifique algo: si
+//  la caja se recolocara con lo que va pasando, la cobertura la mediría contra
+//  una predicción que ya conoce el resultado.
+var float hlUpC = na
+var float hlUpT = na
+var float hlUpB = na
+var float hlDnC = na
+var float hlDnT = na
+var float hlDnB = na
+var float hlBUpC = na
+var float hlBUpT = na
+var float hlBUpB = na
+var float hlBDnC = na
+var float hlBDnT = na
+var float hlBDnB = na
+var float hlAncho = na
+var int   hlNMues = 0
+var bool  hlPunt  = false
+
+var box  hlCajaUp = na
+var box  hlCajaDn = na
+var line hlLnUp   = na
+var line hlLnDn   = na
+var array<box>  hlColaBox = array.new<box>()
+var array<line> hlColaLin = array.new<line>()
+
+var int   hlN      = 0
+var int   hlOkUp   = 0
+var int   hlOkDn   = 0
+var int   hlOkJun  = 0
+var float hlMaeUp  = 0.0
+var float hlMaeDn  = 0.0
+var float hlSAncho = 0.0
+var int   hlBOkUp  = 0
+var int   hlBOkDn  = 0
+var int   hlBOkJun = 0
+var float hlBMaeUp = 0.0
+var float hlBMaeDn = 0.0
+
+//  Del original se quedan fuera pHigh, pLow y dBarIni: se escribían en cada
+//  cambio de día y no se leían en ninguna parte.
+
+if hlNuevoDia and not na(hlOpen)
+    //  Se cierra el día anterior: puntuarlo contra las cajas que se dibujaron
+    //  en SU apertura, y archivar sus excursiones.
+    float adrPrev = hlAdr
+    if not na(adrPrev) and adrPrev > 0
+        if hlPunt
+            hlN += 1
+            bool iU = hlHigh >= hlUpB and hlHigh <= hlUpT
+            bool iD = hlLow  >= hlDnB and hlLow  <= hlDnT
+            hlOkUp   += iU ? 1 : 0
+            hlOkDn   += iD ? 1 : 0
+            hlOkJun  += (iU and iD) ? 1 : 0
+            hlMaeUp  += math.abs(hlHigh - hlUpC) / adrPrev
+            hlMaeDn  += math.abs(hlLow  - hlDnC) / adrPrev
+            hlSAncho += hlAncho
+            if i_hlVerBase
+                bool jU = hlHigh >= hlBUpB and hlHigh <= hlBUpT
+                bool jD = hlLow  >= hlBDnB and hlLow  <= hlBDnT
+                hlBOkUp  += jU ? 1 : 0
+                hlBOkDn  += jD ? 1 : 0
+                hlBOkJun += (jU and jD) ? 1 : 0
+                hlBMaeUp += math.abs(hlHigh - hlBUpC) / adrPrev
+                hlBMaeDn += math.abs(hlLow  - hlBDnC) / adrPrev
+            if i_hlOn and i_hlVerAci and not na(hlCajaUp)
+                box.set_bgcolor(hlCajaUp, iU ? color.new(color.red, 72) : color.new(color.gray, 90))
+                box.set_border_color(hlCajaUp, iU ? color.new(color.red, 20) : color.new(color.gray, 70))
+            if i_hlOn and i_hlVerAci and not na(hlCajaDn)
+                box.set_bgcolor(hlCajaDn, iD ? color.new(color.green, 72) : color.new(color.gray, 90))
+                box.set_border_color(hlCajaDn, iD ? color.new(color.green, 20) : color.new(color.gray, 70))
+        array.push(hlUp,    (hlHigh - hlOpen) / adrPrev)
+        array.push(hlDn,    (hlOpen - hlLow)  / adrPrev)
+        array.push(hlDow,   hlCDow)
+        array.push(hlSigno, hlCSig)
+        array.push(hlTend,  hlCTend)
+        array.push(hlGap,   hlCGap)
+        if array.size(hlUp) > i_hlMaxHist
+            array.shift(hlUp)
+            array.shift(hlDn)
+            array.shift(hlDow)
+            array.shift(hlSigno)
+            array.shift(hlTend)
+            array.shift(hlGap)
+    array.push(hlRango, hlHigh - hlLow)
+    if array.size(hlRango) > i_hlAdrLen * 4
+        array.shift(hlRango)
+    array.push(hlCierres, close[1])
+    if array.size(hlCierres) > 80
+        array.shift(hlCierres)
+    int nc = array.size(hlCierres)
+    if nc >= 20
+        float sc = 0.0
+        for k = nc - 20 to nc - 1
+            sc += array.get(hlCierres, k)
+        hlMed20 := sc / 20.0
+    else
+        hlMed20 := na
+    hlPOpen  := hlOpen
+    hlPClose := close[1]
+
+if hlNuevoDia
+    //  Arranca el día nuevo.
+    hlOpen := open
+    hlHigh := high
+    hlLow  := low
+    int nr = array.size(hlRango)
+    if nr >= i_hlAdrLen
+        float s = 0.0
+        for k = nr - i_hlAdrLen to nr - 1
+            s += array.get(hlRango, k)
+        hlAdr := s / i_hlAdrLen
+    else
+        hlAdr := na
+    hlCDow  := dayofweek
+    hlCSig  := na(hlPClose) or na(hlPOpen) ? 0 : hlPClose > hlPOpen ? 1 : hlPClose < hlPOpen ? -1 : 0
+    hlCTend := na(hlMed20) ? 0 : hlOpen > hlMed20 ? 1 : -1
+    hlCGap  := 0
+    if not na(hlPClose) and not na(hlAdr) and hlAdr > 0
+        float g = (hlOpen - hlPClose) / hlAdr
+        hlCGap := g > i_hlGapUmb ? 1 : g < -i_hlGapUmb ? -1 : 0
+    hlPunt := false
+    if not na(hlAdr) and hlAdr > 0 and array.size(hlUp) >= i_hlMinDias
+        array<int>   idx = f_hlIndices()
+        array<float> sUp = f_hlSub(hlUp, idx)
+        array<float> sDn = f_hlSub(hlDn, idx)
+        hlNMues := array.size(idx)
+        float cUp = na
+        float cDn = na
+        float tUp = na
+        float bUp = na
+        float tDn = na
+        float bDn = na
+        if i_hlAnchoMd == "Cuantiles de la distribución"
+            //  Los bordes SON dos cuantiles, así que la caja se ensancha sola
+            //  hasta cubrir lo pedido. La cobertura deja de ser informativa y
+            //  pasa a ser la cifra que se le ha ordenado dar.
+            float lo = (1.0 - i_hlCobObj / 100.0) / 2.0
+            float hi = 1.0 - lo
+            float qUpL = f_hlCuantil(sUp, lo)
+            float qUpH = f_hlCuantil(sUp, hi)
+            float qDnL = f_hlCuantil(sDn, lo)
+            float qDnH = f_hlCuantil(sDn, hi)
+            cUp := hlOpen + (qUpL + qUpH) / 2.0 * hlAdr
+            cDn := hlOpen - (qDnL + qDnH) / 2.0 * hlAdr
+            bUp := hlOpen + qUpL * hlAdr
+            tUp := hlOpen + qUpH * hlAdr
+            tDn := hlOpen - qDnL * hlAdr
+            bDn := hlOpen - qDnH * hlAdr
+            hlAncho := ((qUpH - qUpL) + (qDnH - qDnL)) / 2.0
+        else
+            float eUp = i_hlEst == "Cuantil" ? f_hlCuantil(sUp, i_hlCuantil / 100.0) : f_hlMediaPond(sUp, i_hlLambda)
+            float eDn = i_hlEst == "Cuantil" ? f_hlCuantil(sDn, i_hlCuantil / 100.0) : f_hlMediaPond(sDn, i_hlLambda)
+            float w = i_hlAnchoPc / 100.0 * hlAdr
+            cUp := hlOpen + eUp * hlAdr
+            cDn := hlOpen - eDn * hlAdr
+            tUp := cUp + w / 2.0
+            bUp := cUp - w / 2.0
+            tDn := cDn + w / 2.0
+            bDn := cDn - w / 2.0
+            hlAncho := i_hlAnchoPc / 100.0
+        hlUpC := cUp
+        hlUpT := tUp
+        hlUpB := bUp
+        hlDnC := cDn
+        hlDnT := tDn
+        hlDnB := bDn
+        //  Predictor tonto: mediana del histórico COMPLETO, sin contexto, con el
+        //  mismo ancho. Es la vara de medir, y no es un adorno: si el modelo con
+        //  contexto no le gana, el contexto no aporta nada.
+        if i_hlVerBase
+            float mUp = f_hlCuantil(hlUp, 0.5)
+            float mDn = f_hlCuantil(hlDn, 0.5)
+            float wB  = hlAncho * hlAdr
+            hlBUpC := hlOpen + mUp * hlAdr
+            hlBUpT := hlBUpC + wB / 2.0
+            hlBUpB := hlBUpC - wB / 2.0
+            hlBDnC := hlOpen - mDn * hlAdr
+            hlBDnT := hlBDnC + wB / 2.0
+            hlBDnB := hlBDnC - wB / 2.0
+        hlPunt := true
+        if i_hlOn and i_hlVerCaja
+            hlCajaUp := box.new(bar_index, hlUpT, bar_index + 1, hlUpB,
+                 border_color = color.new(color.red, 40), bgcolor = color.new(color.red, 85), border_width = 1)
+            hlCajaDn := box.new(bar_index, hlDnT, bar_index + 1, hlDnB,
+                 border_color = color.new(color.green, 40), bgcolor = color.new(color.green, 85), border_width = 1)
+            array.push(hlColaBox, hlCajaUp)
+            array.push(hlColaBox, hlCajaDn)
+        if i_hlOn and i_hlVerLin
+            hlLnUp := line.new(bar_index, hlUpC, bar_index + 1, hlUpC, color = color.new(color.red, 35), style = line.style_dotted)
+            hlLnDn := line.new(bar_index, hlDnC, bar_index + 1, hlDnC, color = color.new(color.green, 35), style = line.style_dotted)
+            array.push(hlColaLin, hlLnUp)
+            array.push(hlColaLin, hlLnDn)
+        //  Dos cajas y dos líneas por día, así que el tope es el doble de los
+        //  días que se quieren ver. Sin esta purga el gráfico acumula hasta
+        //  tocar el límite de Pine, y entonces el motor borra las más antiguas
+        //  por su cuenta y sin avisar.
+        while array.size(hlColaBox) > math.max(i_hlVerHist, 1) * 2
+            box.delete(array.shift(hlColaBox))
+        while array.size(hlColaLin) > math.max(i_hlVerHist, 1) * 2
+            line.delete(array.shift(hlColaLin))
+    else
+        hlUpC := na
+        hlUpT := na
+        hlUpB := na
+        hlDnC := na
+        hlDnT := na
+        hlDnB := na
+        hlCajaUp := na
+        hlCajaDn := na
+        hlLnUp := na
+        hlLnDn := na
+else
+    //  Día en curso: acumular extremos y estirar los dibujos.
+    hlHigh := math.max(nz(hlHigh, high), high)
+    hlLow  := math.min(nz(hlLow,  low),  low)
+    if not na(hlCajaUp)
+        box.set_right(hlCajaUp, bar_index + 1)
+        box.set_right(hlCajaDn, bar_index + 1)
+    if not na(hlLnUp)
+        line.set_x2(hlLnUp, bar_index + 1)
+        line.set_x2(hlLnDn, bar_index + 1)
+
+//  Marca la vela que ESTABLECE un nuevo extremo del día. Mientras el día avanza
+//  puede marcar varias; la última que quede es la buena. No es repintado: es
+//  que el máximo del día no se sabe hasta que el día acaba.
+bool hlEsMax = i_hlOn and i_hlVerExt and barstate.isconfirmed and not na(hlHigh) and high >= hlHigh
+bool hlEsMin = i_hlOn and i_hlVerExt and barstate.isconfirmed and not na(hlLow)  and low  <= hlLow
+
+plotshape(hlEsMax, "HOD/LOD · máximo del día en curso", shape.triangledown, location.abovebar,
+     color.new(color.red, 55), size = size.tiny)
+plotshape(hlEsMin, "HOD/LOD · mínimo del día en curso", shape.triangleup, location.belowbar,
+     color.new(color.green, 55), size = size.tiny)
+
+//  ARREGLO 2 · a * 100.0 / b, no a / b * 100.0. Con los dos argumentos int,
+//  a / b es división ENTERA y con a < b vale 0: la columna entera de cobertura
+//  habría salido "0.0%" sin que nada avisara. Multiplicar primero fuerza el
+//  float antes de dividir.
+f_hlPc(int a, int b) =>
+    b > 0 ? str.tostring(a * 100.0 / b, "#.#") + "%" : "n/d"
+
+var table hlTbl = table.new(position.middle_right, 3, 12, border_width = 1,
+     frame_width = 1, frame_color = color.new(color.gray, 50), bgcolor = color.new(chart.bg_color, 12))
+
+if i_hlOn and i_hlVerTbl and barstate.islast
+    color ch  = color.new(color.gray, 75)
+    color fg  = chart.fg_color
+    color fg2 = color.new(chart.fg_color, 40)
+    table.cell(hlTbl, 0, 0, "HOD / LOD", text_color = fg, text_size = size.small, bgcolor = ch)
+    table.cell(hlTbl, 1, 0, "walk-forward", text_color = fg2, text_size = size.tiny, bgcolor = ch)
+    table.cell(hlTbl, 2, 0, str.tostring(hlN) + " días", text_color = fg, text_size = size.tiny, bgcolor = ch)
+    table.cell(hlTbl, 0, 1, "Cobertura", bgcolor = ch, text_size = size.tiny, text_color = fg)
+    table.cell(hlTbl, 1, 1, "modelo",    bgcolor = ch, text_size = size.tiny, text_color = fg)
+    table.cell(hlTbl, 2, 1, "tonto",     bgcolor = ch, text_size = size.tiny, text_color = fg2)
+    table.cell(hlTbl, 0, 2, "HOD", text_size = size.tiny, text_color = fg2)
+    table.cell(hlTbl, 1, 2, f_hlPc(hlOkUp, hlN), text_size = size.tiny, text_color = color.red)
+    table.cell(hlTbl, 2, 2, i_hlVerBase ? f_hlPc(hlBOkUp, hlN) : "", text_size = size.tiny, text_color = fg2)
+    table.cell(hlTbl, 0, 3, "LOD", text_size = size.tiny, text_color = fg2)
+    table.cell(hlTbl, 1, 3, f_hlPc(hlOkDn, hlN), text_size = size.tiny, text_color = color.green)
+    table.cell(hlTbl, 2, 3, i_hlVerBase ? f_hlPc(hlBOkDn, hlN) : "", text_size = size.tiny, text_color = fg2)
+    table.cell(hlTbl, 0, 4, "CONJUNTA", text_size = size.tiny, text_color = fg)
+    table.cell(hlTbl, 1, 4, f_hlPc(hlOkJun, hlN), text_size = size.tiny, text_color = fg)
+    table.cell(hlTbl, 2, 4, i_hlVerBase ? f_hlPc(hlBOkJun, hlN) : "", text_size = size.tiny, text_color = fg2)
+    table.cell(hlTbl, 0, 5, "MAE (ADR)", text_size = size.tiny, text_color = fg2)
+    table.cell(hlTbl, 1, 5, hlN > 0 ? str.tostring((hlMaeUp + hlMaeDn) / (2 * hlN), "#.##") : "n/d",
+         text_size = size.tiny, text_color = fg)
+    table.cell(hlTbl, 2, 5, i_hlVerBase and hlN > 0 ? str.tostring((hlBMaeUp + hlBMaeDn) / (2 * hlN), "#.##") : "",
+         text_size = size.tiny, text_color = fg2)
+    //  ARREGLO 3 · misma división entera que f_hlPc. Con el orden original el
+    //  veredicto solo podía salir 0 o ±100, que es exactamente la cifra que uno
+    //  mira para decidir si apagar el contexto.
+    string ver = "n/d"
+    color  cv  = fg2
+    if i_hlVerBase
+        if hlN >= 40
+            float dj = (hlOkJun - hlBOkJun) * 100.0 / math.max(hlN, 1)
+            ver := str.tostring(dj, F_SIGNO) + " pp"
+            cv  := dj > 2.0 ? color.green : dj < -2.0 ? color.red : color.orange
+        else
+            ver := "faltan " + str.tostring(40 - hlN)
+    table.cell(hlTbl, 0, 6, "Ventaja", text_size = size.tiny, text_color = fg)
+    table.cell(hlTbl, 1, 6, ver, text_size = size.tiny, text_color = cv)
+    table.cell(hlTbl, 2, 6, "", text_size = size.tiny)
+    //  LA CIFRA QUE DA SENTIDO A TODAS LAS DE ARRIBA. Una cobertura sin el
+    //  ancho al lado no es una métrica: se sube a voluntad ensanchando la caja.
+    float anchoMedio = hlN > 0 ? hlSAncho / hlN : na
+    table.cell(hlTbl, 0, 8, "Ancho caja", text_size = size.tiny, text_color = fg)
+    table.cell(hlTbl, 1, 8, na(anchoMedio) ? "n/d" : str.tostring(anchoMedio * 100, "#.#") + "% ADR",
+         text_size = size.tiny, text_color = color.yellow)
+    table.cell(hlTbl, 2, 8, na(anchoMedio) or na(hlAdr) ? "" : str.tostring(anchoMedio * hlAdr, format.mintick) + " pts",
+         text_size = size.tiny, text_color = color.yellow)
+    table.cell(hlTbl, 0, 9, "ADR hoy", text_size = size.tiny, text_color = fg2)
+    table.cell(hlTbl, 1, 9, na(hlAdr) ? "n/d" : str.tostring(hlAdr, format.mintick), text_size = size.tiny, text_color = fg)
+    table.cell(hlTbl, 2, 9, str.tostring(hlNMues) + (hlNMues < i_hlMinMues ? "d sin ctx" : "d ctx"),
+         text_size = size.tiny, text_color = fg2)
+    table.cell(hlTbl, 0, 10, "Cobertura sin ancho", text_size = size.tiny, text_color = fg2)
+    table.cell(hlTbl, 1, 10, "no es métrica", text_size = size.tiny, text_color = fg2)
+    table.cell(hlTbl, 2, 10, "", text_size = size.tiny)
+    table.cell(hlTbl, 0, 11, "No simula operaciones", text_size = size.tiny, text_color = fg2)
+    table.cell(hlTbl, 1, 11, "no dice si gana", text_size = size.tiny, text_color = fg2)
+    table.cell(hlTbl, 2, 11, "", text_size = size.tiny)
