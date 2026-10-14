@@ -3,8 +3,8 @@
 //  MGC 12-26 (Micro Gold Futures) · FVG + Estructura de mercado · 5 minutos
 // =============================================================================
 //  Estrategia de varias operaciones diarias (v5.4) sobre zonas de imbalance
-//  (Fair Value Gaps) validadas por estructura de mercado multimarco, más seis
-//  fuentes de señal adicionales (S1 a S6).
+//  (Fair Value Gaps) validadas por estructura de mercado multimarco, más ocho
+//  fuentes de señal adicionales (S1 a S8). S7 y S8 vienen APAGADAS.
 //
 //  DESDE LA v5.4 LAS SEIS VIENEN ENCENDIDAS Y EL CUPO DIARIO A 0. Eso ROMPE la
 //  garantía de regresión que había desde la v2.8: los defectos ya NO reproducen
@@ -25,6 +25,10 @@
 //   · S3 fade de bandas  HIPÓTESIS. Excluyente con S2 por construcción.
 //   · S4 noticias        HIPÓTESIS. Comprobar antes la norma de la prop firm.
 //   · S5 sesgo horario   FILTRO, no sistema. No dispara nunca nada.
+//   · S7 order block    HIPÓTESIS. Última vela contraria antes del
+//                        desplazamiento. Cede ante el FVG cuando solapan.
+//   · S8 OTE            LA HIPÓTESIS MÁS DÉBIL DE LAS OCHO. El bloque
+//                        70,5-79 % es una convención, no un resultado medido.
 //   · S6 barrido confirm. HIPÓTESIS. Máquina ARMADO -> DISPARO del v5, con el
 //                        SL saneado de la v5.3 y su modo diagnóstico. Es la
 //                        que hay que medir 20 sesiones antes de relajar nada.
@@ -671,6 +675,62 @@ w6_vol    = input.int(10, "Peso · volumen relativo del gatillo", minval = 0, ma
 w6_rr     = input.int(15, "Peso · R:R disponible",               minval = 0, maxval = 60, group = G_S6S)
 w6_penExt = input.int(20, "Penalización máxima por extensión",   minval = 0, maxval = 60, group = G_S6S)
 
+// --- S7 · Order block (encargo 3) -------------------------------------------
+//  La última vela contraria antes de un desplazamiento que rompe estructura.
+//  La idea es que ahí se cargaron las órdenes que produjeron el movimiento, así
+//  que al volver el precio debería encontrar demanda u oferta.
+//
+//  HIPÓTESIS SIN VALIDAR, como S1-S6. Que la idea tenga una explicación
+//  plausible no la convierte en medida: lo que decide si aporta es su fila de
+//  la tabla de grupos.
+const string G_S7 = "S7 · Order block"
+i_s7On      = input.bool(false, "Activar S7 · order block", group = G_S7,
+     tooltip = "APAGADA. MIDE: el retorno a la última vela contraria anterior a un desplazamiento que rompió estructura. Grupo propio " +
+               "en la tabla de resultados, 'S7 order block'.")
+i_s7MaxVel  = input.int(5, "Velas máximas entre el OB y la ruptura", minval = 1, maxval = 30, group = G_S7,
+     tooltip = "Si la ruptura llega diez velas después, la vela contraria que la precede ya no es 'la última antes del " +
+               "desplazamiento': es una vela cualquiera del camino.")
+i_s7DesplATR = input.float(1.0, "Desplazamiento mínimo desde el OB (x ATR)", minval = 0.1, maxval = 10.0, step = 0.1, group = G_S7,
+     tooltip = "Recorrido desde el extremo de la vela OB hasta el cierre de la vela que rompe. Sin un mínimo, cualquier ruptura " +
+               "marginal dejaría un OB detrás.")
+i_s7MinATR  = input.float(0.3, "Altura mínima de la vela OB (x ATR)", minval = 0.0, maxval = 5.0, step = 0.05, group = G_S7,
+     tooltip = "Por debajo de esto no es un bloque, es ruido.")
+i_s7MaxATR  = input.float(1.5, "Altura máxima de la vela OB (x ATR)", minval = 0.2, maxval = 10.0, step = 0.1, group = G_S7,
+     tooltip = "Un OB enorme da un stop impracticable: el borde lejano queda tan lejos que la operación no cabe en el techo de puntos.")
+i_s7Virgen  = input.bool(true, "Solo order blocks nunca mitigados", group = G_S7,
+     tooltip = "Un OB al que el precio ya volvió una vez ha gastado lo que tuviera dentro. Apagarlo permite operar el segundo retorno.")
+i_s7R       = input.float(2.0, "R fijo del objetivo", minval = 0.5, maxval = 10.0, step = 0.1, group = G_S7)
+i_s7MaxOb   = input.int(30, "Order blocks en memoria", minval = 5, maxval = 100, group = G_S7,
+     tooltip = "Cola FIFO: al pasarse se descarta el más antiguo. Acota la memoria igual que la de zonas FVG.")
+
+// --- S8 · OTE · Optimal Trade Entry (encargo 3) -----------------------------
+//  ESTA ES LA HIPÓTESIS MÁS DÉBIL DE LAS OCHO, y conviene que esté escrito
+//  aquí y no solo en el tooltip:
+//
+//    "El bloque 70,5-79% no tiene ninguna evidencia publicada que lo distinga
+//     de cualquier otro porcentaje de retroceso. Es una convención de una
+//     comunidad, no un resultado medido. Se implementa para poder MEDIRLO
+//     contra las otras fuentes en la tabla de grupos, no porque se sepa que
+//     funciona. Si tras 40 operaciones su esperanza no supera a la del FVG, no
+//     hay motivo para mantenerlo."
+const string G_S8 = "S8 · OTE (70,5-79 %)"
+i_s8On      = input.bool(false, "Activar S8 · OTE", group = G_S8,
+     tooltip = "APAGADA, Y ES LA HIPÓTESIS MÁS DÉBIL DE LAS OCHO.\n\n" +
+               "El bloque 70,5-79 % no tiene ninguna evidencia publicada que lo distinga de cualquier otro porcentaje de retroceso. Es " +
+               "una convención de una comunidad, no un resultado medido. Se implementa para poder MEDIRLO contra las otras fuentes en " +
+               "la tabla de grupos, no porque se sepa que funciona.\n\n" +
+               "Si tras 40 operaciones su esperanza no supera a la del FVG, no hay motivo para mantenerlo.")
+i_s8MinATR  = input.float(2.0, "Tamaño mínimo del tramo impulsivo (x ATR)", minval = 0.5, maxval = 20.0, step = 0.5, group = G_S8,
+     tooltip = "Un tramo pequeño da una zona OTE de dos ticks de ancho, donde 'cerrar dentro' es casualidad.")
+i_s8Desde   = input.float(70.5, "Inicio del bloque OTE (% de retroceso)", minval = 50.0, maxval = 95.0, step = 0.5, group = G_S8)
+i_s8Hasta   = input.float(79.0, "Fin del bloque OTE (% de retroceso)",    minval = 50.0, maxval = 99.0, step = 0.5, group = G_S8,
+     tooltip = "Los dos son inputs justamente porque el 70,5-79 no está medido: poder moverlos es lo que permite comprobar si ese " +
+               "bloque tiene algo que otro no tenga.")
+i_s8VelasMax = input.int(24, "Velas máximas desde que se formó el tramo", minval = 2, maxval = 200, group = G_S8,
+     tooltip = "Un retroceso que llega tres horas después no es el mismo contexto.")
+i_s8Obj     = input.string("R fijo", "Objetivo de S8", options = ["R fijo", "Extremo del tramo"], group = G_S8)
+i_s8R       = input.float(2.0, "R fijo del objetivo", minval = 0.5, maxval = 10.0, step = 0.1, group = G_S8)
+
 const string G_REG = "Régimen de mercado"
 i_clasReg   = input.string("Rango del día / ATR", "Clasificador tendencia-rango",
      options = ["Rango del día / ATR", "ADX", "Persistencia respecto al VWAP"], group = G_REG,
@@ -712,6 +772,8 @@ i_cupoS1    = input.int(0, "Cupo diario propio · S1 (0 = sin cupo propio)", min
 i_cupoS2    = input.int(0, "Cupo diario propio · S2 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP)
 i_cupoS3    = input.int(0, "Cupo diario propio · S3 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP)
 i_cupoS6    = input.int(0, "Cupo diario propio · S6 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP)
+i_cupoS7    = input.int(0, "Cupo diario propio · S7 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP)
+i_cupoS8    = input.int(0, "Cupo diario propio · S8 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP)
 i_cupoS4    = input.int(0, "Cupo diario propio · S4 (0 = sin cupo propio)", minval = 0, maxval = 10, group = G_CUP,
      tooltip = "Un cupo propio ACOTA esa estrategia, no le reserva sitio: el límite diario global sigue mandando por encima. Con 0 la " +
                "estrategia no tiene tope propio y compite solo por el cupo global.")
@@ -2560,12 +2622,12 @@ f_candVale(Cand c) => c.score >= i_s5MinScr
 //  acumuladores incrementales y no un recuento de la tabla: la tabla solo se
 //  calcula en la última vela, y esto hay que consultarlo en cada señal.
 //  Índices: 0 FVG · 1 S1 · 2 S2 · 3 S3 · 4 S4.
-var array<int>   famN = array.new_int(6, 0)
-var array<float> famR = array.new_float(6, 0.0)
+var array<int>   famN = array.new_int(8, 0)
+var array<float> famR = array.new_float(8, 0.0)
 
 f_famIdx(string estr) =>
     estr == "S1" ? 1 : estr == "S2" ? 2 : estr == "S3" ? 3 : estr == "S4" ? 4 :
-         estr == "S6" ? 5 : 0
+         estr == "S6" ? 5 : estr == "S7" ? 6 : estr == "S8" ? 7 : 0
 
 //  ¿Sigue viva esta fuente? Con i_autoOff apagado, siempre.
 f_famViva(string estr) =>
@@ -2583,6 +2645,8 @@ var int opsS2       = 0
 var int opsS3       = 0
 var int opsS4       = 0
 var int opsS6       = 0
+var int opsS7       = 0
+var int opsS8       = 0
 var int nConflictos = 0
 if nuevoDia
     opsFvgDia := 0
@@ -2591,6 +2655,8 @@ if nuevoDia
     opsS3     := 0
     opsS4     := 0
     opsS6     := 0
+    opsS7     := 0
+    opsS8     := 0
 
 //  Un cupo propio ACOTA la estrategia, no le reserva sitio: el límite diario
 //  global sigue mandando por encima. Con 0 no hay tope propio.
@@ -2606,6 +2672,10 @@ f_cupoLibre(string estr) =>
         ok := false
     if estr == "S6" and i_cupoS6 > 0 and opsS6 >= i_cupoS6
         ok := false
+    if estr == "S7" and i_cupoS7 > 0 and opsS7 >= i_cupoS7
+        ok := false
+    if estr == "S8" and i_cupoS8 > 0 and opsS8 >= i_cupoS8
+        ok := false
     ok
 
 //  Rango de prioridad: menor gana. En el modo rotatorio el rango ES el número
@@ -2615,14 +2685,17 @@ f_prioFuente(string estr) =>
     int p = 0
     if i_prioridad == "Estrategias nuevas primero"
         p := estr == "FVG" ? 9 : estr == "S1" ? 0 : estr == "S2" ? 1 :
-             estr == "S3" ? 2 : estr == "S4" ? 3 : 4
+             estr == "S3" ? 2 : estr == "S4" ? 3 : estr == "S6" ? 4 :
+             estr == "S7" ? 5 : 6
     else if i_prioridad == "La que menos haya operado hoy"
         p := estr == "FVG" ? opsFvgDia * 10 : estr == "S1" ? opsS1 * 10 + 1 :
              estr == "S2" ? opsS2 * 10 + 2 : estr == "S3" ? opsS3 * 10 + 3 :
-             estr == "S4" ? opsS4 * 10 + 4 : opsS6 * 10 + 5
+             estr == "S4" ? opsS4 * 10 + 4 : estr == "S6" ? opsS6 * 10 + 5 :
+             estr == "S7" ? opsS7 * 10 + 6 : opsS8 * 10 + 7
     else
         p := estr == "FVG" ? 0 : estr == "S1" ? 1 : estr == "S2" ? 2 :
-             estr == "S3" ? 3 : estr == "S4" ? 4 : 5
+             estr == "S3" ? 3 : estr == "S4" ? 4 : estr == "S6" ? 5 :
+             estr == "S7" ? 6 : 7
     p
 
 // --- S1 · barrido de liquidez (falsa ruptura) -------------------------------
@@ -3306,6 +3379,172 @@ if i_s6On and confBar and not na(atr)
                 else
                     s6S := act
 
+// --- S7 · Order block (encargo 3) -------------------------------------------
+//  Dos pasos, como S6, pero el primero no es un setup: es un INVENTARIO. Cuando
+//  una ruptura de estructura ocurre, se busca hacia atrás la última vela
+//  contraria y se archiva su rango como order block. Después, cuando el precio
+//  vuelve a esa zona, se emite el candidato.
+//
+//  Todo sobre velas confirmadas, y la detección mira SOLO hacia atrás: la zona
+//  se fija en la vela de la ruptura y no se mueve, así que no repinta.
+type ObZona
+    float  top
+    float  bot
+    int    dir        //  1 demanda (vela bajista antes de romper al alza)
+    int    bornBar
+    bool   mitigado   // el precio ya volvió una vez
+    bool   fired      // ya generó una señal
+
+var array<ObZona> obs = array.new<ObZona>()
+var int s7Solape = 0   // descartados por solaparse con un FVG vivo
+
+//  ¿Hay un FVG vivo que solape más del 50 % con esta zona? Se mide el solape
+//  contra la zona MENOR de las dos, que es lo que responde a "¿están señalando
+//  el mismo sitio?": un FVG diminuto dentro de un OB grande solapa el 100 % de
+//  sí mismo y es el FVG el que manda.
+f_s7SolapaFvg(float top, float bot, int dir) =>
+    bool hay = false
+    float alto = top - bot
+    if alto > 0 and array.size(zones) > 0
+        for i = 0 to array.size(zones) - 1
+            Zona z = array.get(zones, i)
+            if z.state <= 1 and not z.fired and z.dir == dir
+                float inter = math.min(top, z.top) - math.max(bot, z.bot)
+                if inter > 0
+                    float menor = math.min(alto, z.top - z.bot)
+                    if menor > 0 and inter / menor > 0.5
+                        hay := true
+    hay
+
+if i_s7On and confBar and not na(atr) and atr > 0
+    //  --- Alta de order blocks al romper estructura
+    for dir = -1 to 1 by 2
+        bool esL   = dir == 1
+        bool rompe = esL ? (bosUp or chochUp) : (bosDn or chochDn)
+        if rompe
+            //  Última vela CONTRARIA dentro de la ventana, de la más reciente
+            //  hacia atrás. Pine no tiene break, de ahí la bandera.
+            int   obK   = -1
+            bool  sigue = true
+            for k = 1 to i_s7MaxVel
+                if sigue
+                    bool contraria = esL ? close[k] < open[k] : close[k] > open[k]
+                    if contraria
+                        obK   := k
+                        sigue := false
+            if obK >= 1
+                float obTop = high[obK]
+                float obBot = low[obK]
+                float alto  = obTop - obBot
+                //  Desplazamiento desde el extremo del OB hasta este cierre.
+                float despl = esL ? close - obBot : obTop - close
+                bool okAlto = alto >= i_s7MinATR * atr and alto <= i_s7MaxATR * atr
+                bool okDesp = despl >= i_s7DesplATR * atr
+                if okAlto and okDesp
+                    array.push(obs, ObZona.new(top = obTop, bot = obBot, dir = dir,
+                         bornBar = bar_index - obK, mitigado = false, fired = false))
+                    while array.size(obs) > i_s7MaxOb
+                        array.shift(obs)
+
+    //  --- Retorno a un order block: candidato
+    //  Mismo criterio que el FVG en "Cierre dentro de la zona": cierre dentro
+    //  de la banda, en el sentido del bloque.
+    if array.size(obs) > 0
+        for i = 0 to array.size(obs) - 1
+            ObZona ob = array.get(obs, i)
+            bool dentro = close <= ob.top and close >= ob.bot
+            bool nueva  = bar_index > ob.bornBar
+            if dentro and nueva
+                bool okVirgen = (not i_s7Virgen) or (not ob.mitigado)
+                if okVirgen and not ob.fired
+                    bool esL = ob.dir == 1
+                    //  Stop en el borde LEJANO del bloque más el colchón.
+                    float sr  = esL ? ob.bot - i_stopBuf * atr : ob.top + i_stopBuf * atr
+                    float stp = esL ? math.floor(sr / f_tickPoints) * f_tickPoints
+                                    : math.ceil( sr / f_tickPoints) * f_tickPoints
+                    float rsk = esL ? close - stp : stp - close
+                    if rsk > 0
+                        //  SOLAPE CON FVG. Los dos señalan casi siempre la
+                        //  misma zona y van en la MISMA dirección, así que el
+                        //  contador de conflictos no los vería: ese cuenta
+                        //  desacuerdos, y aquí hay acuerdo duplicado. Manda el
+                        //  FVG porque su nivel de entrada, el 50 %, es más
+                        //  preciso que "dentro de la banda".
+                        if f_s7SolapaFvg(ob.top, ob.bot, ob.dir)
+                            s7Solape += 1
+                        else
+                            float tgt = esL ? close + i_s7R * rsk : close - i_s7R * rsk
+                            f_addCand("S7", ob.dir, stp, tgt,
+                                 "S7 order block " + (esL ? "de demanda " : "de oferta ") +
+                                 str.tostring(ob.bot, format.mintick) + "-" +
+                                 str.tostring(ob.top, format.mintick))
+                            ob.fired := true
+                ob.mitigado := true
+                array.set(obs, i, ob)
+
+// --- S8 · OTE · Optimal Trade Entry (encargo 3) -----------------------------
+//  LA HIPÓTESIS MÁS DÉBIL DE LAS OCHO. El bloque 70,5-79 % no tiene ninguna
+//  evidencia publicada que lo distinga de cualquier otro porcentaje de
+//  retroceso. Es una convención de una comunidad, no un resultado medido. Se
+//  implementa para poder MEDIRLO contra las otras fuentes en la tabla de
+//  grupos, no porque se sepa que funciona. Si tras 40 operaciones su esperanza
+//  no supera a la del FVG, no hay motivo para mantenerlo.
+//
+//  Por eso los dos porcentajes son INPUTS: poder moverlos es lo único que
+//  permite comprobar si ese bloque tiene algo que otro no tenga.
+//
+//  El tramo se toma de swHigh y swLow, que son pivotes YA CONFIRMADOS, con su
+//  retardo inherente. Esa es la razón de que no repinte, y también de que el
+//  tramo se conozca algo tarde: las dos cosas son la misma.
+var float s8Hi    = na
+var float s8Lo    = na
+var int   s8Bar   = na
+var int   s8Dir   = 0
+var bool  s8Hecho = false
+
+if i_s8On and confBar and not na(atr) and atr > 0
+    //  Alta del tramo: cuando los dos extremos existen y el tamaño basta.
+    if not na(swHigh) and not na(swLow) and swHigh > swLow
+        float rango = swHigh - swLow
+        bool  nuevo = na(s8Hi) or swHigh != s8Hi or swLow != s8Lo
+        if rango >= i_s8MinATR * atr and nuevo
+            s8Hi    := swHigh
+            s8Lo    := swLow
+            s8Bar   := bar_index
+            //  Dirección: la del último swing en formarse. Si el máximo está
+            //  más cerca en el tiempo el tramo es alcista y el retroceso se
+            //  compra; si no, al contrario.
+            s8Dir   := close > (swHigh + swLow) / 2.0 ? 1 : -1
+            s8Hecho := false
+
+    if not na(s8Hi) and not s8Hecho and bar_index - s8Bar <= i_s8VelasMax
+        float rango = s8Hi - s8Lo
+        bool  esL   = s8Dir == 1
+        //  Zona OTE. En largos se mide hacia abajo desde el máximo; en cortos
+        //  hacia arriba desde el mínimo.
+        float z1 = esL ? s8Hi - i_s8Desde / 100.0 * rango : s8Lo + i_s8Desde / 100.0 * rango
+        float z2 = esL ? s8Hi - i_s8Hasta / 100.0 * rango : s8Lo + i_s8Hasta / 100.0 * rango
+        float oteTop = math.max(z1, z2)
+        float oteBot = math.min(z1, z2)
+        if close <= oteTop and close >= oteBot
+            //  Stop más allá del ORIGEN del tramo, que es lo que invalida la
+            //  lectura: si el precio vuelve ahí, el tramo no era impulsivo.
+            float orig = esL ? s8Lo : s8Hi
+            float sr   = esL ? orig - i_stopBuf * atr : orig + i_stopBuf * atr
+            float stp  = esL ? math.floor(sr / f_tickPoints) * f_tickPoints
+                             : math.ceil( sr / f_tickPoints) * f_tickPoints
+            float rsk  = esL ? close - stp : stp - close
+            if rsk > 0
+                float tgt = i_s8Obj == "Extremo del tramo" ? (esL ? s8Hi : s8Lo) :
+                     (esL ? close + i_s8R * rsk : close - i_s8R * rsk)
+                bool okTgt = esL ? tgt > close : tgt < close
+                if okTgt
+                    f_addCand("S8", s8Dir, stp, tgt,
+                         "S8 OTE " + str.tostring(i_s8Desde, "#.#") + "-" +
+                         str.tostring(i_s8Hasta, "#.#") + "% · tramo " +
+                         str.tostring(rango / atr, "#.#") + " ATR · SIN VALIDAR")
+                    s8Hecho := true
+
 // =============================================================================
 //  8 · CONSTRUCCIÓN Y EJECUCIÓN DE LA OPERACIÓN
 // =============================================================================
@@ -3723,6 +3962,10 @@ if setDir != 0 and confBar and not na(atr)
                 opsS4 += 1
             else if setEstr == "S6"
                 opsS6 += 1
+            else if setEstr == "S7"
+                opsS7 += 1
+            else if setEstr == "S8"
+                opsS8 += 1
             else
                 opsFvgDia += 1
 
@@ -4283,7 +4526,7 @@ if barstate.islast
 f_biasTxt(int b) => b ==  1 ? "alcista" : b == -1 ? "bajista" : "rango"
 f_biasCol(int b) => b ==  1 ? color.new(color.teal, 0) : b == -1 ? color.new(color.maroon, 0) : color.new(color.gray, 0)
 
-const int N_DIAG = 32
+const int N_DIAG = 34
 //  Fondo semitransparente (v5.3 §1.4): el panel tiene que leerse SOBRE las
 //  velas sin taparlas. 88 deja ver la vela debajo y el texto encima.
 var table diag = table.new(position.top_right, 2, N_DIAG, border_width = 1,
@@ -4520,8 +4763,8 @@ const int N_MIN_MUESTRA = 30
 //  14 grupos: 6 disparadores de FVG/barrido + 4 estrategias nuevas + 3 tiers +
 //  total. S5 no tiene grupo porque es un filtro, no un sistema: no origina
 //  ninguna operación propia.
-const int N_GRUPOS = 15
-const int N_RES = 17
+const int N_GRUPOS = 17
+const int N_RES = 19
 var table res = table.new(position.bottom_right, 7, N_RES, border_width = 1,
      frame_width = 1, frame_color = color.new(color.gray, 40),
      bgcolor = color.new(chart.bg_color, 12))
@@ -4529,6 +4772,7 @@ var table res = table.new(position.bottom_right, 7, N_RES, border_width = 1,
 if i_verResultados and verExtras and barstate.islast
     array<string> gNom = array.from("FVG5", "FVG1H", "FVG4H", "SWP", "SB", "ASIA",
          "S1 barrido", "S2 pullback", "S3 fade", "S4 noticias", "S6 confirmado",
+         "S7 order block", "S8 OTE",
          "FUERTE", "MEDIA", "débil", "TOTAL")
     array<int>   gN   = array.new_int(N_GRUPOS, 0)
     array<int>   gWin = array.new_int(N_GRUPOS, 0)
@@ -4551,9 +4795,10 @@ if i_verResultados and verExtras and barstate.islast
                      o.disparador == "FVG4H" ? 2 : o.disparador == "SWP" ? 3 :
                      o.disparador == "SB" ? 4 : o.disparador == "ASIA" ? 5 :
                      o.disparador == "S1" ? 6 : o.disparador == "S2" ? 7 :
-                     o.disparador == "S3" ? 8 : o.disparador == "S4" ? 9 : 10
-                int tiIdx = o.tier == 2 ? 11 : o.tier == 1 ? 12 : 13
-                for gi in array.from(di, tiIdx, 14)
+                     o.disparador == "S3" ? 8 : o.disparador == "S4" ? 9 :
+                     o.disparador == "S6" ? 10 : o.disparador == "S7" ? 11 : 12
+                int tiIdx = o.tier == 2 ? 13 : o.tier == 1 ? 14 : 15
+                for gi in array.from(di, tiIdx, 16)
                     array.set(gN,  gi, array.get(gN, gi) + 1)
                     array.set(gR,  gi, array.get(gR, gi) + rr)
                     if rr > 0
@@ -4778,6 +5023,14 @@ if i_showTable and verExtras and barstate.islast
                      str.tostring(b6) + " (exc. " + str.tostring(array.get(s6Excl, idx)) + ")"
     r := f_filaDiag(r, "S6 bloqueos", s6Blo, color.new(color.orange, 0))
 
+    //  S7 · descartados por solaparse con un FVG vivo. Es el contador que el
+    //  de conflictos NO puede dar: ese cuenta DESACUERDOS entre fuentes, y un
+    //  OB y su FVG van en la misma dirección señalando el mismo sitio, o sea
+    //  acuerdo duplicado.
+    r := f_filaDiag(r, "S7 descartados por solape",
+         (i_s7On and s7Solape > 0) ? str.tostring(s7Solape) + " · manda el FVG" : "",
+         color.new(color.gray, 10))
+
     //  Conflicto 4 · cuántas veces dos fuentes se contradijeron en la misma
     //  vela. Si este número es alto, las estrategias se están estorbando y el
     //  problema no es el umbral de ninguna.
@@ -4797,8 +5050,8 @@ if i_showTable and verExtras and barstate.islast
     //  es cuando importa.
     string offTxt = ""
     if i_autoOff
-        array<string> famNom = array.from("FVG", "S1", "S2", "S3", "S4", "S6")
-        for fi = 0 to 5
+        array<string> famNom = array.from("FVG", "S1", "S2", "S3", "S4", "S6", "S7", "S8")
+        for fi = 0 to 7
             int nf = array.get(famN, fi)
             if nf >= i_autoOffN and array.get(famR, fi) / nf < 0
                 offTxt += (offTxt == "" ? "" : " · ") + array.get(famNom, fi) +
