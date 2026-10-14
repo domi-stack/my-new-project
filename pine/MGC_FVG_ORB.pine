@@ -2,14 +2,19 @@
 // =============================================================================
 //  MGC 12-26 (Micro Gold Futures) · FVG + Estructura de mercado · 5 minutos
 // =============================================================================
-//  Estrategia de varias operaciones diarias (v5.4) sobre zonas de imbalance
+//  Estrategia de varias operaciones diarias (v5.5) sobre zonas de imbalance
 //  (Fair Value Gaps) validadas por estructura de mercado multimarco, más ocho
-//  fuentes de señal adicionales (S1 a S8). S7 y S8 vienen APAGADAS.
+//  fuentes de señal adicionales (S1 a S8).
 //
-//  DESDE LA v5.4 LAS SEIS VIENEN ENCENDIDAS Y EL CUPO DIARIO A 0. Eso ROMPE la
-//  garantía de regresión que había desde la v2.8: los defectos ya NO reproducen
-//  la línea base. Para volver a ella hay que poner las seis a false, el cupo
-//  diario a 1 y el modo horario en 'Ventana NY'. La lista exacta está en
+//  ESTADO DE LAS FUENTES EN LOS DEFECTOS:
+//    FVG + estructura   siempre activa, es el sistema base
+//    S1 a S6            ENCENDIDAS desde la v5.4
+//    S7 y S8            APAGADAS
+//    Cupo diario        0, o sea sin límite
+//
+//  ESO ROMPE la garantía de regresión que había desde la v2.8: los defectos ya
+//  NO reproducen la línea base. Para volver a ella hay que poner S1-S6 a false,
+//  el cupo diario a 1 y el modo horario en 'Ventana NY'. La lista exacta está en
 //  CHANGELOG.md, apartado v5.4.
 //
 //  Encenderlas las pone a MEDIR, no las valida: las seis siguen siendo
